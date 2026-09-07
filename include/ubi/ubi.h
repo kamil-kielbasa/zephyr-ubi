@@ -207,7 +207,7 @@ struct ubi_config {
  * \brief Volume creation parameters.
  */
 struct ubi_volume_config {
-	/** NUL-terminated, at most #UBI_VOLUME_NAME_MAX_LEN characters,
+	/** NULL-terminated, at most #UBI_VOLUME_NAME_MAX_LEN characters,
 	 *  unique within the device. */
 	const char *name;
 	/** Number of logical erase blocks to reserve. */
@@ -267,7 +267,7 @@ struct ubi_volume_info {
 	uint32_t leb_count;
 	/** How many of them currently have a physical block behind them. */
 	uint32_t mapped_lebs;
-	/** NUL-terminated volume name. */
+	/** NULL-terminated volume name. */
 	char name[UBI_VOLUME_NAME_MAX_LEN + 1];
 };
 
@@ -480,8 +480,7 @@ int ubi_device_get_info(struct ubi_device *ubi, struct ubi_device_info *info);
  *         Flash driver failure.
  */
 int ubi_volume_create(struct ubi_device *ubi,
-		      const struct ubi_volume_config *config,
-		      uint32_t *vol_id);
+		      const struct ubi_volume_config *config, uint32_t *vol_id);
 
 /**
  * \brief Remove a volume and release its blocks.
@@ -511,7 +510,7 @@ int ubi_volume_remove(struct ubi_device *ubi, uint32_t vol_id);
  *        resolve by name after every attach.
  *
  * \param[in] ubi                       Attached device.
- * \param[in] name                      NUL-terminated volume name.
+ * \param[in] name                      NULL-terminated volume name.
  * \param[out] vol_id                   Identifier of the volume found.
  *
  * \retval 0
@@ -521,8 +520,7 @@ int ubi_volume_remove(struct ubi_device *ubi, uint32_t vol_id);
  * \retval -ENOENT
  *         No volume with that name.
  */
-int ubi_volume_find(struct ubi_device *ubi, const char *name,
-		    uint32_t *vol_id);
+int ubi_volume_find(struct ubi_device *ubi, const char *name, uint32_t *vol_id);
 
 /**
  * \brief Read a volume's properties.

@@ -53,3 +53,24 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Build output
+build/
+build*/
+twister-out*/
+*.bin
+*.uf8
+*.uf2
+
+# Native simulator and flash backing files
+flash.bin
+*.exe
+*.log
+
+# Tooling
+compile_commands.json
+.venv/
+__pycache__/
+*.pyc
+.cache/
+.DS_Store
