@@ -9,10 +9,13 @@
  *          them costs nothing and keeps the two domains apart, so a volume
  *          table record can never pass as a block header.
  *
- *          The image sequence number salts both derivations, which means a
- *          reformat produces different keys and headers from the previous
- *          image cannot verify even if their image sequence number were
- *          somehow forced to match.
+ *          The image sequence number deliberately plays no part here. It
+ *          lives inside the authenticated headers, so a leftover block from
+ *          an earlier format is caught by comparing that field, not by
+ *          holding a different key. Keeping it out of the derivation is what
+ *          lets attach build its keys before it has read a single byte of
+ *          flash, which in turn keeps every field on the flash subject to
+ *          verification before use.
  *
  * \copyright Copyright (c) 2026
  *
@@ -60,7 +63,6 @@ BUILD_ASSERT(0 != PSA_MAC_LENGTH(PSA_KEY_TYPE_AES, UBI_KEY_BITS, PSA_ALG_CMAC),
  * \param ikm_key_id                    Application key handle. Must carry
  *                                      \c PSA_KEY_USAGE_DERIVE and permit
  *                                      \c PSA_ALG_HKDF(PSA_ALG_SHA_256).
- * \param image_seq                     Salts both derivations.
  * \param[out] key_header               Key authenticating EC and VID headers.
  * \param[out] key_volume_table         Key authenticating the volume table
  *                                      record.
@@ -76,8 +78,8 @@ BUILD_ASSERT(0 != PSA_MAC_LENGTH(PSA_KEY_TYPE_AES, UBI_KEY_BITS, PSA_ALG_CMAC),
  * \retval -EIO
  *         The crypto backend failed.
  */
-int ubi_key_derive(psa_key_id_t ikm_key_id, uint32_t image_seq,
-		   psa_key_id_t *key_header, psa_key_id_t *key_volume_table);
+int ubi_key_derive(psa_key_id_t ikm_key_id, psa_key_id_t *key_header,
+		   psa_key_id_t *key_volume_table);
 
 /**
  * \brief Destroy a derived key and clear the handle.

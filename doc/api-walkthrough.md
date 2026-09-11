@@ -9,19 +9,20 @@ Every usage scenario, in code. Full contracts live in
 ## 1. The device handle
 
 `struct ubi_device` is **opaque** — its layout belongs to the library. You allocate the
-storage; the size comes from Kconfig:
+storage; the size comes from the library at run time:
 
 ```c
 #include <ubi/ubi.h>
 
-static uint8_t ubi_storage[CONFIG_UBI_DEVICE_STORAGE_SIZE] __aligned(8);
-static struct ubi_device *const ubi = (struct ubi_device *)ubi_storage;
+struct ubi_device *ubi = malloc(ubi_device_size());
 ```
 
-`CONFIG_UBI_DEVICE_STORAGE_SIZE` is computed from the same limits the library itself uses,
-and a `BUILD_ASSERT` inside the library keeps it honest — too small a value is a build
-error, not a runtime surprise. `ubi_device_size()` returns the same number if you would
-rather allocate dynamically.
+The handle itself is small and its size does not depend on how large the managed
+flash is: everything that scales with the partition — one byte of state, four bytes of
+erase count and two bytes of mapping per physical erase block — is taken from the heap
+when the device attaches and given back when it detaches. Size the heap with
+`CONFIG_HEAP_MEM_POOL_SIZE`; `ubi_device_init()` returns `-ENOMEM` when it is too small
+for the partition it was pointed at.
 
 ---
 
@@ -228,21 +229,10 @@ void storage_idle_work(void)
 	if (info.max_erase_count - info.min_erase_count > 128) {
 		ubi_maintenance(ubi, UBI_MAINTENANCE_RELOCATE, 1, &res);
 	}
-}
-```
 
-`budget` caps the number of operations, which caps the latency — one 64 KB erase on QSPI
-NOR takes on the order of 200 ms. A budget of zero only reports how much work is pending.
-
-Relocation moves data byte for byte. The layer above sees **no difference at all**: the
-same LEB reads back identically before and after.
-
----
-
-## 9. Events
-
-```c
-static void on_ubi_event(const struct ubi_event *e, void *user_context)
+        if (volume_table_degraded) {
+                ubi_maintenance(ubi, UBI_MAINTENANCE_REPAIR, 1, &res);
+        }
 {
 	switch (e->type) {
 	case UBI_EVENT_HDR_CORRUPT:
@@ -251,28 +241,25 @@ static void on_ubi_event(const struct ubi_event *e, void *user_context)
 		break;
 
 	case UBI_EVENT_HDR_TAMPERED:
-	case UBI_EVENT_LAYOUT_TAMPERED:
-		/* CRC matches, CMAC does not - someone recomputed the checksum. */
-		LOG_ERR("Tampering, PEB %u", e->pnum);
-		security_incident();
-		break;
+        case UBI_EVENT_VOLUME_TABLE_TAMPERED:
+                /* CRC matches, CMAC does not - someone recomputed the checksum. */
+                LOG_ERR("Tampering, PEB %u", e->pnum);
+                security_incident();
+                break;
 
-	case UBI_EVENT_PEB_BAD:
-		LOG_WRN("PEB %u retired", e->pnum);
-		break;
+        case UBI_EVENT_VOLUME_TABLE_DEGRADED:
+                /* One copy left: one erase would now cost a revision. */
+                LOG_WRN("Volume table degraded, repair is due");
+                volume_table_degraded = true;
+                break;
 
-	case UBI_EVENT_FRESHNESS_FAIL:
-		LOG_ERR("Rollback");
-		break;
-	}
-}
-```
+        case UBI_EVENT_LEB_ORPHANED:
+                LOG_WRN("PEB %u claims volume %u block %u, which is gone",
+                        e->pnum, e->vol_id, e->lnum);
+                break;
 
-The `HDR_CORRUPT` / `HDR_TAMPERED` distinction exists because every header carries both a
-CRC32 and a CMAC. A bad CRC is a failure. A good CRC with a bad CMAC means someone changed
-a field **and recomputed the checksum** — that is intent.
-
----
+        case UBI_EVENT_PEB_BAD:
+                LOG_WRN("PEB %u retired", e->pnum);
 
 ## 10. Rollback detection
 

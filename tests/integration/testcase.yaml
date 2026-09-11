@@ -1,0 +1,8 @@
+tests:
+  ubi.integration:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    integration_platforms:
+      - native_sim

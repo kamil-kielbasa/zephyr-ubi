@@ -24,7 +24,9 @@
 
 /* UBI headers: */
 #include "ubi_header.h"
+#include "ubi_io.h"
 #include "ubi_key.h"
+#include "ubi_private.h"
 
 /* Module defines ---------------------------------------------------------- */
 
@@ -38,9 +40,6 @@ LOG_MODULE_REGISTER(ubi, CONFIG_UBI_LOG_LEVEL);
 
 /** Only dynamic volumes exist; static ones were dropped by design. */
 #define UBI_VID_TYPE_DYNAMIC (1)
-
-/** Byte value a NOR erase leaves behind. */
-#define UBI_ERASED_BYTE (0xFF)
 
 /*
  * Field offsets. Every field Linux UBI interprets sits where Linux puts it;
@@ -153,32 +152,33 @@ static int header_seal(psa_key_id_t key_id, uint32_t pnum, size_t tag_offset,
  * \param pnum                          Physical block the bytes came from.
  * \param magic                         Magic the header must carry.
  * \param tag_offset                    Where the tag sits in \p buffer.
+ * \param erase_value                   Byte an erase leaves behind.
  *
  * \return Verdict of the checks.
  */
 static enum ubi_header_status header_verify(const uint8_t *buffer,
 					    size_t buffer_size,
 					    psa_key_id_t key_id, uint32_t pnum,
-					    uint32_t magic, size_t tag_offset);
+					    uint32_t magic, size_t tag_offset,
+					    uint8_t erase_value);
 
 /**
- * \brief Report whether every byte reads as erased.
+ * \brief Report whether every byte reads as the flash's erased value.
  */
-static bool header_is_erased(const uint8_t *buffer);
+static bool header_is_erased(const uint8_t *buffer, uint8_t erase_value);
 
 /**
- * \brief Log a verdict that the operator should know about.
+ * \brief Name what is wrong with a header, or NULL when nothing is.
  *
- *        Blank and foreign blocks are ordinary during a scan, so they stay
- *        quiet; logging them would bury the real findings under one line per
- *        block. Only damage, tampering and backend failures are reported.
+ *        Blank and foreign blocks are ordinary during a scan, so they have no
+ *        complaint; logging them would bury the real findings under one line
+ *        per block.
  *
- * \param status                        Verdict to report.
- * \param pnum                          Physical block concerned.
- * \param[in] kind                      "EC" or "VID", for the message.
+ * \param status                        Verdict to describe.
+ *
+ * \return Complaint to log, or \c NULL when the verdict is unremarkable.
  */
-static void header_log_status(enum ubi_header_status status, uint32_t pnum,
-			      const char *kind);
+static const char *header_status_complaint(enum ubi_header_status status);
 
 /**
  * \brief Reject arguments that cannot produce a valid header.
@@ -250,13 +250,14 @@ static int header_seal(psa_key_id_t key_id, uint32_t pnum, size_t tag_offset,
 static enum ubi_header_status header_verify(const uint8_t *buffer,
 					    size_t buffer_size,
 					    psa_key_id_t key_id, uint32_t pnum,
-					    uint32_t magic, size_t tag_offset)
+					    uint32_t magic, size_t tag_offset,
+					    uint8_t erase_value)
 {
 	uint8_t message[HEADER_MAC_INPUT_SIZE] = { 0 };
 	psa_status_t status = PSA_ERROR_GENERIC_ERROR;
 	int ret = 0;
 
-	if (header_is_erased(buffer)) {
+	if (header_is_erased(buffer, erase_value)) {
 		return UBI_HEADER_ERASED;
 	}
 
@@ -296,10 +297,10 @@ static enum ubi_header_status header_verify(const uint8_t *buffer,
 	return UBI_HEADER_ERROR;
 }
 
-static bool header_is_erased(const uint8_t *buffer)
+static bool header_is_erased(const uint8_t *buffer, uint8_t erase_value)
 {
 	for (size_t i = 0; i < UBI_HEADER_SIZE; ++i) {
-		if (UBI_ERASED_BYTE != buffer[i]) {
+		if (erase_value != buffer[i]) {
 			return false;
 		}
 	}
@@ -307,25 +308,20 @@ static bool header_is_erased(const uint8_t *buffer)
 	return true;
 }
 
-static void header_log_status(enum ubi_header_status status, uint32_t pnum,
-			      const char *kind)
+static const char *header_status_complaint(enum ubi_header_status status)
 {
 	switch (status) {
 	case UBI_HEADER_CORRUPT:
-		LOG_WRN("PEB %u: %s header CRC mismatch, treating as unusable",
-			pnum, kind);
-		break;
+		return "CRC mismatch, so it is unusable";
 	case UBI_HEADER_TAMPERED:
-		LOG_ERR("PEB %u: %s header CRC matches but tag does not; "
-			"the header was modified",
-			pnum, kind);
-		break;
+		return "CRC matches but the tag does not, so it was modified";
 	case UBI_HEADER_ERROR:
-		LOG_ERR("PEB %u: %s header could not be checked", pnum, kind);
-		break;
+		return "could not be checked";
+	case UBI_HEADER_OK:
+	case UBI_HEADER_ERASED:
+	case UBI_HEADER_NOT_UBI:
 	default:
-		/* OK, ERASED and NOT_UBI are ordinary during a scan. */
-		break;
+		return NULL;
 	}
 }
 
@@ -379,6 +375,7 @@ int ubi_ec_header_serialize(const struct ubi_ec_header *header,
 enum ubi_header_status ubi_ec_header_parse(const uint8_t *buffer,
 					   size_t buffer_size,
 					   psa_key_id_t key_id, uint32_t pnum,
+					   uint8_t erase_value,
 					   struct ubi_ec_header *header)
 {
 	enum ubi_header_status status = UBI_HEADER_ERROR;
@@ -393,10 +390,14 @@ enum ubi_header_status ubi_ec_header_parse(const uint8_t *buffer,
 	}
 
 	status = header_verify(buffer, buffer_size, key_id, pnum,
-			       UBI_EC_HEADER_MAGIC, EC_OFFSET_TAG);
+			       UBI_EC_HEADER_MAGIC, EC_OFFSET_TAG, erase_value);
 
 	if (UBI_HEADER_OK != status) {
-		header_log_status(status, pnum, "EC");
+		const char *complaint = header_status_complaint(status);
+
+		if (NULL != complaint)
+			LOG_ERR("PEB %u: EC header %s", pnum, complaint);
+
 		return status;
 	}
 
@@ -472,6 +473,7 @@ int ubi_vid_header_serialize(const struct ubi_vid_header *header,
 enum ubi_header_status ubi_vid_header_parse(const uint8_t *buffer,
 					    size_t buffer_size,
 					    psa_key_id_t key_id, uint32_t pnum,
+					    uint8_t erase_value,
 					    struct ubi_vid_header *header)
 {
 	enum ubi_header_status status = UBI_HEADER_ERROR;
@@ -484,10 +486,15 @@ enum ubi_header_status ubi_vid_header_parse(const uint8_t *buffer,
 	}
 
 	status = header_verify(buffer, buffer_size, key_id, pnum,
-			       UBI_VID_HEADER_MAGIC, VID_OFFSET_TAG);
+			       UBI_VID_HEADER_MAGIC, VID_OFFSET_TAG,
+			       erase_value);
 
 	if (UBI_HEADER_OK != status) {
-		header_log_status(status, pnum, "VID");
+		const char *complaint = header_status_complaint(status);
+
+		if (NULL != complaint)
+			LOG_ERR("PEB %u: VID header %s", pnum, complaint);
+
 		return status;
 	}
 
@@ -504,4 +511,81 @@ enum ubi_header_status ubi_vid_header_parse(const uint8_t *buffer,
 	header->copy_flag = (0 != buffer[VID_OFFSET_COPY_FLAG]);
 
 	return UBI_HEADER_OK;
+}
+
+int ubi_headers_read(const struct ubi_device *ubi, uint32_t pnum,
+		     struct ubi_headers *headers)
+{
+	uint8_t buffer[UBI_DATA_OFFSET] = { 0 };
+	int ret = ubi_io_read(ubi, pnum, 0, buffer, sizeof(buffer));
+
+	if (0 != ret) {
+		LOG_ERR("PEB %u: the headers could not be read (%d)", pnum,
+			ret);
+		return ret;
+	}
+
+	memset(headers, 0, sizeof(*headers));
+
+	headers->ec_status =
+		ubi_ec_header_parse(&buffer[UBI_EC_HEADER_OFFSET],
+				    UBI_HEADER_SIZE, ubi->keys.header, pnum,
+				    ubi->geometry.erase_value, &headers->ec);
+
+	headers->vid_status =
+		ubi_vid_header_parse(&buffer[UBI_VID_HEADER_OFFSET],
+				     UBI_HEADER_SIZE, ubi->keys.header, pnum,
+				     ubi->geometry.erase_value, &headers->vid);
+
+	return 0;
+}
+
+int ubi_ec_header_write(const struct ubi_device *ubi, uint32_t pnum,
+			const struct ubi_ec_header *header)
+{
+	uint8_t buffer[UBI_HEADER_SIZE] = { 0 };
+	int ret = ubi_ec_header_serialize(header, ubi->keys.header, pnum,
+					  buffer, sizeof(buffer));
+
+	if (0 != ret) {
+		LOG_ERR("PEB %u: the EC header could not be sealed (%d)", pnum,
+			ret);
+		return ret;
+	}
+
+	ret = ubi_io_write(ubi, pnum, UBI_EC_HEADER_OFFSET, buffer,
+			   sizeof(buffer));
+
+	if (0 != ret) {
+		LOG_ERR("PEB %u: the EC header could not be written (%d)", pnum,
+			ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+int ubi_vid_header_write(const struct ubi_device *ubi, uint32_t pnum,
+			 const struct ubi_vid_header *header)
+{
+	uint8_t buffer[UBI_HEADER_SIZE] = { 0 };
+	int ret = ubi_vid_header_serialize(header, ubi->keys.header, pnum,
+					   buffer, sizeof(buffer));
+
+	if (0 != ret) {
+		LOG_ERR("PEB %u: the VID header could not be sealed (%d)", pnum,
+			ret);
+		return ret;
+	}
+
+	ret = ubi_io_write(ubi, pnum, UBI_VID_HEADER_OFFSET, buffer,
+			   sizeof(buffer));
+
+	if (0 != ret) {
+		LOG_ERR("PEB %u: the VID header could not be written (%d)",
+			pnum, ret);
+		return ret;
+	}
+
+	return 0;
 }

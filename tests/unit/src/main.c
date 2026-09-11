@@ -43,6 +43,9 @@
 /** Arbitrary but fixed image sequence number. */
 #define TEST_IMAGE_SEQ (0xA5A5F00DUL)
 
+/** Byte an erase leaves behind on the flash these tests pretend to use. */
+#define TEST_ERASE_VALUE (0xFF)
+
 /* Module variables and constants ------------------------------------------ */
 
 static const uint8_t test_ikm[32] = {
@@ -116,8 +119,7 @@ static void *suite_setup(void)
 
 	ikm_key = import_ikm(test_ikm, sizeof(test_ikm), PSA_KEY_USAGE_DERIVE);
 
-	zassert_ok(ubi_key_derive(ikm_key, TEST_IMAGE_SEQ, &key_header,
-				  &key_volume_table));
+	zassert_ok(ubi_key_derive(ikm_key, &key_header, &key_volume_table));
 
 	return NULL;
 }
@@ -150,7 +152,7 @@ ZTEST(ubi_unit, test_ec_header_roundtrip)
 					   buffer, sizeof(buffer)));
 	zassert_equal(UBI_HEADER_OK,
 		      ubi_ec_header_parse(buffer, sizeof(buffer), key_header,
-					  TEST_PNUM, &read));
+					  TEST_PNUM, TEST_ERASE_VALUE, &read));
 
 	zassert_equal(written.erase_count, read.erase_count);
 	zassert_equal(written.image_seq, read.image_seq);
@@ -176,7 +178,7 @@ ZTEST(ubi_unit, test_vid_header_roundtrip)
 					    buffer, sizeof(buffer)));
 	zassert_equal(UBI_HEADER_OK,
 		      ubi_vid_header_parse(buffer, sizeof(buffer), key_header,
-					   TEST_PNUM, &read));
+					   TEST_PNUM, TEST_ERASE_VALUE, &read));
 
 	zassert_equal(written.sqnum, read.sqnum);
 	zassert_equal(written.vol_id, read.vol_id);
@@ -191,10 +193,27 @@ ZTEST(ubi_unit, test_erased_block_has_no_header)
 {
 	zassert_equal(UBI_HEADER_ERASED,
 		      ubi_ec_header_parse(erased_block, sizeof(erased_block),
-					  key_header, TEST_PNUM, NULL));
+					  key_header, TEST_PNUM,
+					  TEST_ERASE_VALUE, NULL));
 	zassert_equal(UBI_HEADER_ERASED,
 		      ubi_vid_header_parse(erased_block, sizeof(erased_block),
-					   key_header, TEST_PNUM, NULL));
+					   key_header, TEST_PNUM,
+					   TEST_ERASE_VALUE, NULL));
+}
+
+ZTEST(ubi_unit, test_blankness_follows_the_flash_erase_value)
+{
+	uint8_t zeroed_block[UBI_HEADER_SIZE] = { 0 };
+
+	/* A flash that erases to zero must not be told that its blank blocks
+	 * hold something, nor that a block of 0xFF is blank. */
+	zassert_equal(UBI_HEADER_ERASED,
+		      ubi_ec_header_parse(zeroed_block, sizeof(zeroed_block),
+					  key_header, TEST_PNUM, 0x00, NULL));
+	zassert_not_equal(UBI_HEADER_ERASED,
+			  ubi_ec_header_parse(erased_block,
+					      sizeof(erased_block), key_header,
+					      TEST_PNUM, 0x00, NULL));
 }
 
 /* Tests: the on-flash layout is a contract -------------------------------- */
@@ -268,7 +287,7 @@ ZTEST(ubi_unit, test_authentic_header_with_foreign_layout_is_refused)
 	/* The tag verifies, but this build cannot address that layout. */
 	zassert_equal(UBI_HEADER_NOT_UBI,
 		      ubi_ec_header_parse(buffer, sizeof(buffer), key_header,
-					  TEST_PNUM, NULL));
+					  TEST_PNUM, TEST_ERASE_VALUE, NULL));
 }
 
 /* Tests: damage versus tampering ------------------------------------------ */
@@ -286,7 +305,7 @@ ZTEST(ubi_unit, test_crc_reports_damage)
 
 	zassert_equal(UBI_HEADER_CORRUPT,
 		      ubi_ec_header_parse(buffer, sizeof(buffer), key_header,
-					  TEST_PNUM, NULL));
+					  TEST_PNUM, TEST_ERASE_VALUE, NULL));
 }
 
 ZTEST(ubi_unit, test_tag_reports_tampering_of_every_byte)
@@ -319,7 +338,8 @@ ZTEST(ubi_unit, test_tag_reports_tampering_of_every_byte)
 
 		zassert_equal(expected,
 			      ubi_ec_header_parse(buffer, sizeof(buffer),
-						  key_header, TEST_PNUM, NULL),
+						  key_header, TEST_PNUM,
+						  TEST_ERASE_VALUE, NULL),
 			      "byte %zu escaped detection", i);
 	}
 }
@@ -337,7 +357,8 @@ ZTEST(ubi_unit, test_tag_binds_the_block_number)
 	/* Byte-for-byte identical, read from a different block: rejected. */
 	zassert_equal(UBI_HEADER_TAMPERED,
 		      ubi_ec_header_parse(buffer, sizeof(buffer), key_header,
-					  TEST_PNUM + 1, NULL));
+					  TEST_PNUM + 1, TEST_ERASE_VALUE,
+					  NULL));
 }
 
 ZTEST(ubi_unit, test_header_and_volume_table_keys_are_separate)
@@ -350,7 +371,7 @@ ZTEST(ubi_unit, test_header_and_volume_table_keys_are_separate)
 
 	zassert_equal(UBI_HEADER_TAMPERED,
 		      ubi_ec_header_parse(buffer, sizeof(buffer), key_header,
-					  TEST_PNUM, NULL));
+					  TEST_PNUM, TEST_ERASE_VALUE, NULL));
 }
 
 ZTEST(ubi_unit, test_vid_tag_does_not_pass_as_ec)
@@ -365,7 +386,7 @@ ZTEST(ubi_unit, test_vid_tag_does_not_pass_as_ec)
 	 * kinds can never be confused for one another. */
 	zassert_equal(UBI_HEADER_NOT_UBI,
 		      ubi_ec_header_parse(buffer, sizeof(buffer), key_header,
-					  TEST_PNUM, NULL));
+					  TEST_PNUM, TEST_ERASE_VALUE, NULL));
 }
 
 /* Tests: the argument contract -------------------------------------------- */
@@ -383,10 +404,11 @@ ZTEST(ubi_unit, test_short_buffer_is_refused)
 					       buffer, sizeof(buffer)));
 	zassert_equal(UBI_HEADER_ERROR,
 		      ubi_ec_header_parse(buffer, UBI_HEADER_SIZE - 1,
-					  key_header, TEST_PNUM, NULL));
+					  key_header, TEST_PNUM,
+					  TEST_ERASE_VALUE, NULL));
 	zassert_equal(UBI_HEADER_ERROR,
 		      ubi_vid_header_parse(NULL, sizeof(buffer), key_header,
-					   TEST_PNUM, NULL));
+					   TEST_PNUM, TEST_ERASE_VALUE, NULL));
 }
 
 ZTEST(ubi_unit, test_absent_key_is_refused)
@@ -399,7 +421,8 @@ ZTEST(ubi_unit, test_absent_key_is_refused)
 						       sizeof(buffer)));
 	zassert_equal(UBI_HEADER_ERROR,
 		      ubi_vid_header_parse(buffer, sizeof(buffer),
-					   PSA_KEY_ID_NULL, TEST_PNUM, NULL));
+					   PSA_KEY_ID_NULL, TEST_PNUM,
+					   TEST_ERASE_VALUE, NULL));
 }
 
 /* Tests: key derivation --------------------------------------------------- */
@@ -411,8 +434,7 @@ ZTEST(ubi_unit, test_derivation_is_deterministic)
 	uint8_t first[UBI_HEADER_TAG_SIZE] = { 0 };
 	uint8_t second[UBI_HEADER_TAG_SIZE] = { 0 };
 
-	zassert_ok(ubi_key_derive(ikm_key, TEST_IMAGE_SEQ, &again_header,
-				  &again_volume_table));
+	zassert_ok(ubi_key_derive(ikm_key, &again_header, &again_volume_table));
 
 	key_fingerprint(key_header, first, sizeof(first));
 	key_fingerprint(again_header, second, sizeof(second));
@@ -439,24 +461,32 @@ ZTEST(ubi_unit, test_derivation_separates_its_two_labels)
 		     memcmp(of_header, of_volume_table, sizeof(of_header)));
 }
 
-ZTEST(ubi_unit, test_derivation_is_salted_by_image_seq)
+ZTEST(ubi_unit, test_derivation_follows_the_key_material)
 {
+	uint8_t other_ikm[sizeof(test_ikm)] = { 0 };
+	psa_key_id_t other_key = PSA_KEY_ID_NULL;
 	psa_key_id_t other_header = PSA_KEY_ID_NULL;
 	psa_key_id_t other_volume_table = PSA_KEY_ID_NULL;
 	uint8_t original[UBI_HEADER_TAG_SIZE] = { 0 };
-	uint8_t reformatted[UBI_HEADER_TAG_SIZE] = { 0 };
+	uint8_t derived[UBI_HEADER_TAG_SIZE] = { 0 };
 
-	zassert_ok(ubi_key_derive(ikm_key, TEST_IMAGE_SEQ + 1, &other_header,
-				  &other_volume_table));
+	memcpy(other_ikm, test_ikm, sizeof(other_ikm));
+	other_ikm[0] ^= 0x01;
+	other_key =
+		import_ikm(other_ikm, sizeof(other_ikm), PSA_KEY_USAGE_DERIVE);
+
+	zassert_ok(
+		ubi_key_derive(other_key, &other_header, &other_volume_table));
 
 	key_fingerprint(key_header, original, sizeof(original));
-	key_fingerprint(other_header, reformatted, sizeof(reformatted));
+	key_fingerprint(other_header, derived, sizeof(derived));
 
-	/* A reformat must not reproduce the previous image's keys. */
-	zassert_true(0 != memcmp(original, reformatted, sizeof(original)));
+	/* One bit of input keying material must change everything. */
+	zassert_true(0 != memcmp(original, derived, sizeof(original)));
 
 	ubi_key_destroy(&other_header);
 	ubi_key_destroy(&other_volume_table);
+	ubi_key_destroy(&other_key);
 }
 
 ZTEST(ubi_unit, test_derivation_rejects_a_key_it_may_not_use)
@@ -466,9 +496,8 @@ ZTEST(ubi_unit, test_derivation_rejects_a_key_it_may_not_use)
 	psa_key_id_t derived_header = PSA_KEY_ID_NULL;
 	psa_key_id_t derived_volume_table = PSA_KEY_ID_NULL;
 
-	zassert_equal(-EACCES,
-		      ubi_key_derive(wrong, TEST_IMAGE_SEQ, &derived_header,
-				     &derived_volume_table));
+	zassert_equal(-EACCES, ubi_key_derive(wrong, &derived_header,
+					      &derived_volume_table));
 	zassert_equal(PSA_KEY_ID_NULL, derived_header);
 	zassert_equal(PSA_KEY_ID_NULL, derived_volume_table);
 
@@ -480,9 +509,8 @@ ZTEST(ubi_unit, test_derivation_rejects_an_absent_key)
 	psa_key_id_t derived_header = PSA_KEY_ID_NULL;
 	psa_key_id_t derived_volume_table = PSA_KEY_ID_NULL;
 
-	zassert_equal(-EINVAL,
-		      ubi_key_derive(PSA_KEY_ID_NULL, TEST_IMAGE_SEQ,
-				     &derived_header, &derived_volume_table));
-	zassert_equal(-EINVAL, ubi_key_derive(ikm_key, TEST_IMAGE_SEQ, NULL,
+	zassert_equal(-EINVAL, ubi_key_derive(PSA_KEY_ID_NULL, &derived_header,
 					      &derived_volume_table));
+	zassert_equal(-EINVAL,
+		      ubi_key_derive(ikm_key, NULL, &derived_volume_table));
 }

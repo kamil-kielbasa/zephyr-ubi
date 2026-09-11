@@ -2,69 +2,66 @@
 # SPDX-License-Identifier: MIT
 
 menuconfig UBI
-	bool "Unsorted Block Images (UBI)"
-	select FLASH
-	select FLASH_MAP
-	select CRC
-	select PSA_WANT_ALG_CMAC
-	select PSA_WANT_ALG_HKDF
-	select PSA_WANT_ALG_SHA_256
-	select PSA_WANT_KEY_TYPE_AES
-	select PSA_WANT_KEY_TYPE_DERIVE
-	help
-	  Volume manager for raw flash. Maps logical erase blocks onto
-	  physical ones, spreads wear across the partition, survives power
-	  loss and authenticates its own metadata with AES-CMAC.
+        bool "Unsorted Block Images (UBI)"
+        select FLASH
+        select FLASH_MAP
+        select CRC
+        select PSA_WANT_ALG_CMAC
+        select PSA_WANT_ALG_HKDF
+        select PSA_WANT_ALG_SHA_256
+        select PSA_WANT_KEY_TYPE_AES
+        select PSA_WANT_KEY_TYPE_DERIVE
+        help
+          Volume manager for raw flash. Maps logical erase blocks onto
+          physical ones, spreads wear across the partition, survives power
+          loss and authenticates its own metadata with AES-CMAC.
 
-	  UBI never encrypts or authenticates application data; only its own
-	  headers and volume table are protected.
+          UBI never encrypts or authenticates application data; only its own
+          headers and volume table are protected.
 
 if UBI
 
-config UBI_MAX_NR_OF_PEBS
-	int "Maximum number of physical erase blocks"
-	default 128
-	range 4 65534
-	help
-	  Upper bound on the blocks in a managed partition. Costs five bytes
-	  of RAM per block. Attaching a larger partition fails with -ENOSPC.
-
-config UBI_MAX_NR_OF_LEBS
-	int "Maximum number of logical erase blocks, summed over all volumes"
-	default 512
-	range 1 65534
-	help
-	  Sizes the erase block association table. Costs two bytes per entry.
-
 config UBI_MAX_NR_OF_VOLUMES
-	int "Maximum number of volumes"
-	default 4
-	range 1 64
-
-config UBI_DEVICE_STORAGE_SIZE
-	int "Size in bytes of the caller-allocated device handle"
-	default 4096
-	help
-	  The device handle is opaque, so its storage is allocated by the
-	  caller. A build assertion checks this against the real size, and
-	  ubi_device_size() reports it at run time.
+        int "Maximum number of volumes"
+        default 4
+        range 1 64
+        help
+          The only size limit that does not follow from the partition itself:
+          how many logical erase blocks exist is decided by the partition,
+          but how many volumes they are divided into is a design choice of
+          the application.
 
 config UBI_VERIFY_ON_READ
-	bool "Verify the VID header before every read"
-	default n
-	help
-	  Re-reads and authenticates the header on every ubi_leb_read().
-	  Headers are always verified during attach, so this only guards
-	  against tampering while the device is running, and it costs an
-	  extra flash read plus a CMAC on the hottest path.
+        bool "Verify the VID header before every read"
+        default n
+        help
+          Re-reads and authenticates the header on every ubi_leb_read().
+          Headers are always verified during attach, so this only guards
+          against tampering while the device is running, and it costs an
+          extra flash read plus a CMAC on the hottest path.
+
+config UBI_STATE_CHECK_INTERVAL
+        int "Metadata writes between state checks"
+        default 64
+        range 1 65535
+        help
+          UBI counts the erase counter headers, volume identifier headers and
+          volume table records it writes. Once this many have gone by, the
+          state callback is consulted before the next operation that would
+          write, so that a refusal can be honoured with nothing written.
+
+          The callback is always consulted at the end of an attach; this only
+          decides how often it is consulted afterwards, so that a long uptime
+          is not a way around the check. It does no flash I/O, so a small
+          number is cheap.
 
 config UBI_WEAR_LEVELING_THRESHOLD
-	int "Erase count spread that makes relocation worthwhile"
-	default 256
-	range 64 512
-	help
-	  Reported through ubi_device_get_info(); a spread wider than this
-	  means UBI_MAINTENANCE_RELOCATE has work to do.
+        int "Erase count spread that makes relocation worthwhile"
+        default 256
+        range 64 512
+        help
+          Reported through ubi_device_get_info(); a spread wider than this
+          means UBI_MAINTENANCE_RELOCATE has work to do.
 
 module = UBI
 module-str = ubi

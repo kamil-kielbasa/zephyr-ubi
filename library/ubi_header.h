@@ -94,7 +94,8 @@
 enum ubi_header_status {
 	/** Magic, CRC and tag all check out; the fields are trustworthy. */
 	UBI_HEADER_OK = 0,
-	/** Every byte reads as erased; the block carries no header. */
+	/** Every byte reads as the flash's erased value; the block carries no
+	 *  header. */
 	UBI_HEADER_ERASED,
 	/** Magic does not match, the format version is unknown, or the block
 	 *  layout is not the one this build uses. */
@@ -148,6 +149,27 @@ struct ubi_vid_header {
 	bool copy_flag;
 };
 
+/**
+ * \brief Both headers of one physical erase block, read in one go.
+ *
+ *        They are adjacent, so fetching them together costs one flash read
+ *        rather than two. The verdicts travel with the fields because a scan
+ *        has to act on them separately: an erase counter header can verify
+ *        while the volume identifier header behind it is blank.
+ */
+struct ubi_headers {
+	/** Verdict of parsing the erase counter header. */
+	enum ubi_header_status ec_status;
+	/** Erase counter header, filled only on #UBI_HEADER_OK. */
+	struct ubi_ec_header ec;
+	/** Verdict of parsing the volume identifier header. */
+	enum ubi_header_status vid_status;
+	/** Volume identifier header, filled only on #UBI_HEADER_OK. */
+	struct ubi_vid_header vid;
+};
+
+struct ubi_device;
+
 /* Module interface function declarations ---------------------------------- */
 
 /**
@@ -189,6 +211,8 @@ int ubi_ec_header_serialize(const struct ubi_ec_header *header,
  * \param buffer_size                   Bytes available at \p buffer.
  * \param key_id                        CMAC key.
  * \param pnum                          Physical block the bytes came from.
+ * \param erase_value                   Byte an erase leaves behind on this
+ *                                      flash, from \c flash_get_parameters().
  * \param[out] header                   Decoded fields, written only on
  *                                      #UBI_HEADER_OK. May be \c NULL.
  *
@@ -197,6 +221,7 @@ int ubi_ec_header_serialize(const struct ubi_ec_header *header,
 enum ubi_header_status ubi_ec_header_parse(const uint8_t *buffer,
 					   size_t buffer_size,
 					   psa_key_id_t key_id, uint32_t pnum,
+					   uint8_t erase_value,
 					   struct ubi_ec_header *header);
 
 /**
@@ -228,6 +253,8 @@ int ubi_vid_header_serialize(const struct ubi_vid_header *header,
  * \param buffer_size                   Bytes available at \p buffer.
  * \param key_id                        CMAC key.
  * \param pnum                          Physical block the bytes came from.
+ * \param erase_value                   Byte an erase leaves behind on this
+ *                                      flash, from \c flash_get_parameters().
  * \param[out] header                   Decoded fields, written only on
  *                                      #UBI_HEADER_OK. May be \c NULL.
  *
@@ -236,6 +263,68 @@ int ubi_vid_header_serialize(const struct ubi_vid_header *header,
 enum ubi_header_status ubi_vid_header_parse(const uint8_t *buffer,
 					    size_t buffer_size,
 					    psa_key_id_t key_id, uint32_t pnum,
+					    uint8_t erase_value,
 					    struct ubi_vid_header *header);
+
+/**
+ * \brief Read and verify both headers of a physical erase block.
+ *
+ *        One flash read covers both, and the device supplies the key and the
+ *        erased byte value, so a caller only names the block.
+ *
+ * \param[in] ubi                       Device holding the partition.
+ * \param pnum                          Physical erase block to read.
+ * \param[out] headers                  Verdicts and, where they are
+ *                                      #UBI_HEADER_OK, the fields.
+ *
+ * \retval 0
+ *         The bytes were read; \p headers says what they turned out to be.
+ * \retval -EINVAL
+ *         \p pnum is outside the partition.
+ * \retval -EIO
+ *         The flash driver failed.
+ */
+int ubi_headers_read(const struct ubi_device *ubi, uint32_t pnum,
+		     struct ubi_headers *headers);
+
+/**
+ * \brief Seal an erase counter header and write it to a block.
+ *
+ *        The block must have been erased first; on NOR a second write over
+ *        the same bytes destroys them.
+ *
+ * \param[in] ubi                       Device holding the partition.
+ * \param pnum                          Physical erase block to stamp.
+ * \param[in] header                    Fields to write.
+ *
+ * \retval 0
+ *         Written.
+ * \retval -EINVAL
+ *         \p pnum is outside the partition.
+ * \retval -EIO
+ *         The crypto backend or the flash driver failed.
+ */
+int ubi_ec_header_write(const struct ubi_device *ubi, uint32_t pnum,
+			const struct ubi_ec_header *header);
+
+/**
+ * \brief Seal a volume identifier header and write it to a block.
+ *
+ *        The block must already carry an erase counter header and nothing
+ *        else.
+ *
+ * \param[in] ubi                       Device holding the partition.
+ * \param pnum                          Physical erase block to write.
+ * \param[in] header                    Fields to write.
+ *
+ * \retval 0
+ *         Written.
+ * \retval -EINVAL
+ *         \p pnum is outside the partition.
+ * \retval -EIO
+ *         The crypto backend or the flash driver failed.
+ */
+int ubi_vid_header_write(const struct ubi_device *ubi, uint32_t pnum,
+			 const struct ubi_vid_header *header);
 
 #endif /* UBI_HEADER_H */

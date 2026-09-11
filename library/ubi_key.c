@@ -36,6 +36,16 @@ static const uint8_t label_header[] = "zephyr-ubi/header/v1";
 /** Domain separator for the volume table record key. */
 static const uint8_t label_volume_table[] = "zephyr-ubi/volume-table/v1";
 
+/**
+ * Fixed HKDF salt.
+ *
+ * A salt does not have to be secret or varying; separating the two keys is
+ * the labels' job. What matters here is that it is a compile-time constant,
+ * because anything read from the flash would have to be trusted before it
+ * could be verified.
+ */
+static const uint8_t derivation_salt[] = "zephyr-ubi/v1";
+
 /* Static function declarations -------------------------------------------- */
 
 /**
@@ -45,7 +55,6 @@ static const uint8_t label_volume_table[] = "zephyr-ubi/volume-table/v1";
  *        caller can log it; a static helper stays silent itself.
  *
  * \param ikm_key_id                    Key to derive from.
- * \param image_seq                     Salt.
  * \param[in] label                     Domain separator.
  * \param label_length                  Bytes of \p label to use.
  * \param[out] key_id                   Receives the derived key.
@@ -58,24 +67,21 @@ static const uint8_t label_volume_table[] = "zephyr-ubi/volume-table/v1";
  * \retval -EIO
  *         The crypto backend failed.
  */
-static int key_derive_one(psa_key_id_t ikm_key_id, uint32_t image_seq,
-			  const uint8_t *label, size_t label_length,
-			  psa_key_id_t *key_id, psa_status_t *psa_status);
+static int key_derive_one(psa_key_id_t ikm_key_id, const uint8_t *label,
+			  size_t label_length, psa_key_id_t *key_id,
+			  psa_status_t *psa_status);
 
 /* Static function definitions --------------------------------------------- */
 
-static int key_derive_one(psa_key_id_t ikm_key_id, uint32_t image_seq,
-			  const uint8_t *label, size_t label_length,
-			  psa_key_id_t *key_id, psa_status_t *psa_status)
+static int key_derive_one(psa_key_id_t ikm_key_id, const uint8_t *label,
+			  size_t label_length, psa_key_id_t *key_id,
+			  psa_status_t *psa_status)
 {
 	psa_key_derivation_operation_t operation =
 		PSA_KEY_DERIVATION_OPERATION_INIT;
 	psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
-	uint8_t salt[sizeof(image_seq)] = { 0 };
 	psa_status_t status = PSA_ERROR_GENERIC_ERROR;
 	int ret = -EIO;
-
-	sys_put_be32(image_seq, salt);
 
 	psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
 	psa_set_key_bits(&attributes, UBI_KEY_BITS);
@@ -93,8 +99,10 @@ static int key_derive_one(psa_key_id_t ikm_key_id, uint32_t image_seq,
 	}
 
 	/* HKDF wants the salt before the secret. */
-	status = psa_key_derivation_input_bytes(
-		&operation, PSA_KEY_DERIVATION_INPUT_SALT, salt, sizeof(salt));
+	status = psa_key_derivation_input_bytes(&operation,
+						PSA_KEY_DERIVATION_INPUT_SALT,
+						derivation_salt,
+						sizeof(derivation_salt) - 1);
 
 	if (PSA_SUCCESS != status) {
 		goto exit;
@@ -138,8 +146,8 @@ exit:
 
 /* Module interface function definitions ----------------------------------- */
 
-int ubi_key_derive(psa_key_id_t ikm_key_id, uint32_t image_seq,
-		   psa_key_id_t *key_header, psa_key_id_t *key_volume_table)
+int ubi_key_derive(psa_key_id_t ikm_key_id, psa_key_id_t *key_header,
+		   psa_key_id_t *key_volume_table)
 {
 	psa_status_t status = PSA_ERROR_GENERIC_ERROR;
 	int ret = 0;
@@ -158,8 +166,8 @@ int ubi_key_derive(psa_key_id_t ikm_key_id, uint32_t image_seq,
 	*key_volume_table = PSA_KEY_ID_NULL;
 
 	/* Labels are separators, so the terminating NUL carries no meaning. */
-	ret = key_derive_one(ikm_key_id, image_seq, label_header,
-			     sizeof(label_header) - 1, key_header, &status);
+	ret = key_derive_one(ikm_key_id, label_header, sizeof(label_header) - 1,
+			     key_header, &status);
 
 	if (0 != ret) {
 		LOG_ERR("deriving the header key failed (%d), psa_status=%d",
@@ -167,7 +175,7 @@ int ubi_key_derive(psa_key_id_t ikm_key_id, uint32_t image_seq,
 		return ret;
 	}
 
-	ret = key_derive_one(ikm_key_id, image_seq, label_volume_table,
+	ret = key_derive_one(ikm_key_id, label_volume_table,
 			     sizeof(label_volume_table) - 1, key_volume_table,
 			     &status);
 
