@@ -176,4 +176,33 @@ int ubi_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
 int ubi_volume_table_write(struct ubi_device *ubi, uint32_t lnum,
 			   const struct ubi_volume_table_record *record);
 
+/**
+ * \brief Put a record in force, leaving both copies carrying it.
+ *
+ *        Writes the copy that is not in force, switches to it, then writes
+ *        the other one. An interruption therefore always leaves at least one
+ *        complete copy, and the one with the higher sequence number is the
+ *        newer of the two. A pair that was already out of step is brought
+ *        back into line on the way through.
+ *
+ *        The device is left describing whatever actually reached the flash:
+ *        on success both copies carry \p record, and on failure the caller's
+ *        own state is the only thing that still needs rolling back.
+ *
+ * \param[in,out] ubi                   Attached device.
+ * \param[in] record                    Record to put in force.
+ *
+ * \retval 0
+ *         Both copies carry it.
+ * \retval -EINVAL
+ *         A pointer is \c NULL, or the record is malformed.
+ * \retval -ENOSPC
+ *         No block could be found to hold a copy.
+ * \retval -EIO
+ *         The crypto backend or the flash driver failed before any copy was
+ *         written; what was in force still is.
+ */
+int ubi_volume_table_commit(struct ubi_device *ubi,
+			    const struct ubi_volume_table_record *record);
+
 #endif /* UBI_VOLUME_TABLE_H */

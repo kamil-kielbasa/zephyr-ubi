@@ -27,7 +27,11 @@
 #include "ubi_header.h"
 #include "ubi_io.h"
 #include "ubi_key.h"
+#include "ubi_device.h"
+#include "ubi_peb.h"
 #include "ubi_private.h"
+#include "ubi_state.h"
+#include "ubi_volume.h"
 #include "ubi_volume_table.h"
 
 /* Module defines ---------------------------------------------------------- */
@@ -64,11 +68,6 @@ struct volume_table_copy {
 
 /** \name Opening and closing a partition */
 /**@{*/
-
-/**
- * \brief Reject a configuration that cannot drive the library.
- */
-static int config_validate(const struct ubi_config *config);
 
 /**
  * \brief Ask the flash driver for the dimensions of the partition.
@@ -120,83 +119,15 @@ static void device_tables_free(struct ubi_device *ubi);
 static void event_emit(const struct ubi_device *ubi, enum ubi_event_type type,
 		       uint32_t pnum, uint32_t vol_id, uint32_t lnum);
 
-/**
- * \brief Take stock of the device as it stands. Reports \c -EFAULT when a
- *        block carries a state no \ref ubi_peb_state names, because the
- *        counts would be a lie and the table itself is not to be trusted.
- */
-static int device_info_fill(const struct ubi_device *ubi,
-			    struct ubi_device_info *info);
-
-/**
- * \brief Ask the application whether it still trusts the device, and latch a
- *        refusal so that retrying is not a way around it.
- */
-static int state_check(struct ubi_device *ubi);
-
 /**@}*/
 
-/** \name Block state and preparation */
+/** \name Reading the volume table */
 /**@{*/
-
-/**
- * \brief Read the lifecycle state of a physical erase block.
- */
-static enum ubi_peb_state peb_state_get(const struct ubi_device *ubi,
-					uint32_t pnum);
-
-/**
- * \brief Set it. The narrowing to a byte happens here and nowhere else.
- */
-static void peb_state_set(struct ubi_device *ubi, uint32_t pnum,
-			  enum ubi_peb_state state);
 
 /**
  * \brief Draw an image sequence number that is not zero.
  */
 static int image_seq_draw(uint32_t *image_seq);
-
-/**
- * \brief Erase a block and stamp it with a fresh erase counter header.
- *
- *        Wear history is worth keeping, so the previous count is read back
- *        first; a block whose count can no longer be trusted starts again
- *        from zero, and the caller is told so it can say as much.
- */
-static int peb_prepare(const struct ubi_device *ubi, uint32_t pnum,
-		       bool *history_lost);
-
-/**@}*/
-
-/** \name Rebuilding the volumes */
-/**@{*/
-
-/**
- * \brief Give every declared volume its slice of the mapping table.
- */
-static int volumes_build(struct ubi_device *ubi,
-			 const struct ubi_volume_table_record *record);
-
-/**
- * \brief Look up a volume by identifier, including the internal one that
- *        holds the volume table. Public entry points must keep the latter
- *        out of the application's reach.
- */
-static struct ubi_volume *volume_find(struct ubi_device *ubi, uint32_t vol_id);
-
-/**
- * \brief Report which physical block backs a logical one, or
- *        #UBI_LEB_UNMAPPED when none does. Returns \c -ENOENT for an unknown
- *        volume and \c -ERANGE for a volume that does not reach that far.
- */
-static int leb_mapping_get(const struct ubi_device *ubi, uint32_t vol_id,
-			   uint32_t lnum, uint16_t *pnum);
-
-/**
- * \brief Point a logical block at a physical one, with the same contract.
- */
-static int leb_mapping_set(struct ubi_device *ubi, uint32_t vol_id,
-			   uint32_t lnum, uint16_t pnum);
 
 /**
  * \brief Report whether every copy of the record says the same thing, so that
@@ -244,20 +175,6 @@ static void scan_second_pass(struct ubi_device *ubi);
 /**@}*/
 
 /* Static function definitions --------------------------------------------- */
-
-static int config_validate(const struct ubi_config *config)
-{
-	if (NULL == config)
-		return -EINVAL;
-
-	if (PSA_KEY_ID_NULL == config->ikm_key_id)
-		return -EINVAL;
-
-	if (NULL == config->event_cb || NULL == config->state_cb)
-		return -EINVAL;
-
-	return 0;
-}
 
 static int geometry_measure(const struct flash_area *flash_area,
 			    struct ubi_geometry *geometry)
@@ -416,99 +333,6 @@ static void event_emit(const struct ubi_device *ubi, enum ubi_event_type type,
 	ubi->callbacks.event(&event, ubi->callbacks.user_context);
 }
 
-static int device_info_fill(const struct ubi_device *ubi,
-			    struct ubi_device_info *info)
-{
-	struct ubi_device_info measured = {
-		.peb_count = ubi->geometry.peb_count,
-		.peb_size = ubi->geometry.peb_size,
-		.leb_size = ubi->geometry.leb_size,
-		.write_block_size = ubi->geometry.write_block_size,
-		.volume_count = ubi->volumes.count,
-		.image_seq = ubi->image_seq,
-		.revision = ubi->volumes.revision,
-		.global_sqnum = ubi->global_sqnum,
-	};
-	uint32_t lowest_erase_count = UINT32_MAX;
-
-	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
-		const enum ubi_peb_state state = peb_state_get(ubi, pnum);
-		const uint32_t erase_count = ubi->blocks.erase_count[pnum];
-
-		switch (state) {
-		case UBI_PEB_FREE:
-			measured.free_pebs += 1;
-			break;
-		case UBI_PEB_UNKNOWN:
-		case UBI_PEB_RECLAIM:
-			measured.reclaimable_pebs += 1;
-			break;
-		case UBI_PEB_BAD:
-			measured.bad_pebs += 1;
-			break;
-		case UBI_PEB_MAPPED:
-			break;
-		default:
-			return -EFAULT;
-		}
-
-		/* Every other state means the erase counter header verified
-		 * and named this image, so its count can be added up. */
-		if (UBI_PEB_UNKNOWN == state || UBI_PEB_BAD == state)
-			continue;
-
-		measured.healthy_pebs += 1;
-		measured.total_erase_count += erase_count;
-
-		if (erase_count < lowest_erase_count)
-			lowest_erase_count = erase_count;
-
-		if (erase_count > measured.max_erase_count)
-			measured.max_erase_count = erase_count;
-	}
-
-	if (0 != measured.healthy_pebs)
-		measured.min_erase_count = lowest_erase_count;
-
-	*info = measured;
-
-	return 0;
-}
-
-static int state_check(struct ubi_device *ubi)
-{
-	if (ubi->untrusted)
-		return -EROFS;
-
-	struct ubi_device_info info = { 0 };
-	const int ret = device_info_fill(ubi, &info);
-
-	if (0 != ret)
-		return ret;
-
-	ubi->writes_since_check = 0;
-
-	if (UBI_STATE_TRUSTED ==
-	    ubi->callbacks.state(&info, ubi->callbacks.user_context))
-		return 0;
-
-	ubi->untrusted = true;
-
-	return -EROFS;
-}
-
-static enum ubi_peb_state peb_state_get(const struct ubi_device *ubi,
-					uint32_t pnum)
-{
-	return (enum ubi_peb_state)ubi->blocks.state[pnum];
-}
-
-static void peb_state_set(struct ubi_device *ubi, uint32_t pnum,
-			  enum ubi_peb_state state)
-{
-	ubi->blocks.state[pnum] = (uint8_t)state;
-}
-
 static int image_seq_draw(uint32_t *image_seq)
 {
 	/* Zero marks "no image", so a fresh one must not land on it. */
@@ -527,112 +351,6 @@ static int image_seq_draw(uint32_t *image_seq)
 	}
 
 	return -EIO;
-}
-
-static int peb_prepare(const struct ubi_device *ubi, uint32_t pnum,
-		       bool *history_lost)
-{
-	struct ubi_headers headers = { 0 };
-	int ret = ubi_headers_read(ubi, pnum, &headers);
-
-	if (0 != ret)
-		return ret;
-
-	const bool trustworthy = (UBI_HEADER_OK == headers.ec_status) ||
-				 (UBI_HEADER_ERASED == headers.ec_status);
-	const uint64_t erase_count = (UBI_HEADER_OK == headers.ec_status) ?
-					     headers.ec.erase_count :
-					     0;
-
-	*history_lost = !trustworthy;
-
-	ret = ubi_io_erase(ubi, pnum);
-
-	if (0 != ret)
-		return ret;
-
-	const struct ubi_ec_header header = {
-		.erase_count = erase_count + 1,
-		.image_seq = ubi->image_seq,
-		.vid_header_offset = UBI_VID_HEADER_OFFSET,
-		.data_offset = UBI_DATA_OFFSET,
-	};
-
-	return ubi_ec_header_write(ubi, pnum, &header);
-}
-
-static int volumes_build(struct ubi_device *ubi,
-			 const struct ubi_volume_table_record *record)
-{
-	ubi->volumes.count = record->volume_count;
-	ubi->volumes.id_watermark = record->vol_id_watermark;
-	ubi->volumes.eba_used = 0;
-
-	for (uint32_t i = 0; i < record->volume_count; ++i) {
-		const struct ubi_volume_table_entry *entry =
-			&record->entries[i];
-		struct ubi_volume *volume = &ubi->volumes.entries[i];
-
-		if (entry->leb_count >
-		    ubi->geometry.peb_count - ubi->volumes.eba_used)
-			return -ENOSPC;
-
-		volume->vol_id = entry->vol_id;
-		volume->leb_count = entry->leb_count;
-		strncpy(volume->name, entry->name, sizeof(volume->name) - 1);
-		volume->name[sizeof(volume->name) - 1] = '\0';
-		volume->eba = &ubi->volumes.eba_pool[ubi->volumes.eba_used];
-
-		ubi->volumes.eba_used += entry->leb_count;
-	}
-
-	return 0;
-}
-
-static struct ubi_volume *volume_find(struct ubi_device *ubi, uint32_t vol_id)
-{
-	if (UBI_VOLUME_TABLE_VOL_ID == vol_id)
-		return &ubi->volume_table.volume;
-
-	for (uint32_t i = 0; i < ubi->volumes.count; ++i) {
-		if (ubi->volumes.entries[i].vol_id == vol_id)
-			return &ubi->volumes.entries[i];
-	}
-
-	return NULL;
-}
-
-static int leb_mapping_get(const struct ubi_device *ubi, uint32_t vol_id,
-			   uint32_t lnum, uint16_t *pnum)
-{
-	const struct ubi_volume *volume =
-		volume_find((struct ubi_device *)ubi, vol_id);
-
-	if (NULL == volume)
-		return -ENOENT;
-
-	if (lnum >= volume->leb_count)
-		return -ERANGE;
-
-	*pnum = volume->eba[lnum];
-
-	return 0;
-}
-
-static int leb_mapping_set(struct ubi_device *ubi, uint32_t vol_id,
-			   uint32_t lnum, uint16_t pnum)
-{
-	struct ubi_volume *volume = volume_find(ubi, vol_id);
-
-	if (NULL == volume)
-		return -ENOENT;
-
-	if (lnum >= volume->leb_count)
-		return -ERANGE;
-
-	volume->eba[lnum] = pnum;
-
-	return 0;
 }
 
 static bool
@@ -657,7 +375,7 @@ static void scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable)
 
 		if (0 != ret) {
 			LOG_WRN("PEB %u: unreadable, retiring it", pnum);
-			peb_state_set(ubi, pnum, UBI_PEB_BAD);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_BAD);
 			event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
 				   UBI_VOL_ID_INVALID, 0);
 			continue;
@@ -669,13 +387,13 @@ static void scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable)
 		case UBI_HEADER_ERASED:
 		case UBI_HEADER_NOT_UBI:
 			/* Blank, or someone else's bytes; erase before use. */
-			peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		case UBI_HEADER_CORRUPT:
 			/* An interrupted stamp, so the block itself is fine. */
 			event_emit(ubi, UBI_EVENT_HDR_CORRUPT, pnum,
 				   UBI_VOL_ID_INVALID, 0);
-			peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		case UBI_HEADER_TAMPERED:
 			/* A well-formed header under a key this build does not
@@ -684,13 +402,13 @@ static void scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable)
 			*unopenable += 1;
 			event_emit(ubi, UBI_EVENT_HDR_TAMPERED, pnum,
 				   UBI_VOL_ID_INVALID, 0);
-			peb_state_set(ubi, pnum, UBI_PEB_BAD);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_BAD);
 			continue;
 		case UBI_HEADER_ERROR:
 		default:
 			event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
 				   UBI_VOL_ID_INVALID, 0);
-			peb_state_set(ubi, pnum, UBI_PEB_BAD);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_BAD);
 			continue;
 		}
 
@@ -703,30 +421,30 @@ static void scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable)
 		case UBI_HEADER_OK:
 			break;
 		case UBI_HEADER_ERASED:
-			peb_state_set(ubi, pnum, UBI_PEB_FREE);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_FREE);
 			continue;
 		case UBI_HEADER_NOT_UBI:
-			peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		case UBI_HEADER_CORRUPT:
 			event_emit(ubi, UBI_EVENT_HDR_CORRUPT, pnum,
 				   UBI_VOL_ID_INVALID, 0);
-			peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		case UBI_HEADER_TAMPERED:
 			event_emit(ubi, UBI_EVENT_HDR_TAMPERED, pnum,
 				   UBI_VOL_ID_INVALID, 0);
-			peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		case UBI_HEADER_ERROR:
 		default:
 			event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
 				   UBI_VOL_ID_INVALID, 0);
-			peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		}
 
-		peb_state_set(ubi, pnum, UBI_PEB_MAPPED);
+		ubi_peb_state_set(ubi, pnum, UBI_PEB_MAPPED);
 
 		if (headers.vid.sqnum > ubi->global_sqnum)
 			ubi->global_sqnum = headers.vid.sqnum;
@@ -760,7 +478,7 @@ static void scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable)
 static void scan_second_pass(struct ubi_device *ubi)
 {
 	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
-		const enum ubi_peb_state state = peb_state_get(ubi, pnum);
+		const enum ubi_peb_state state = ubi_peb_state_get(ubi, pnum);
 
 		if (UBI_PEB_FREE != state && UBI_PEB_MAPPED != state)
 			continue;
@@ -770,12 +488,12 @@ static void scan_second_pass(struct ubi_device *ubi)
 
 		if (0 != ret) {
 			LOG_WRN("PEB %u: became unreadable, retiring it", pnum);
-			peb_state_set(ubi, pnum, UBI_PEB_BAD);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_BAD);
 			continue;
 		}
 
 		if (UBI_HEADER_OK != headers.ec_status) {
-			peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		}
 
@@ -784,7 +502,7 @@ static void scan_second_pass(struct ubi_device *ubi)
 			 * refuses the whole attach, we reclaim the block. */
 			LOG_DBG("PEB %u: belongs to image 0x%08x, not 0x%08x",
 				pnum, headers.ec.image_seq, ubi->image_seq);
-			peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		}
 
@@ -793,7 +511,7 @@ static void scan_second_pass(struct ubi_device *ubi)
 			continue;
 
 		if (UBI_HEADER_OK != headers.vid_status) {
-			peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		}
 
@@ -806,13 +524,14 @@ static void scan_second_pass(struct ubi_device *ubi)
 			    pnum == ubi->volume_table.eba[vid->lnum])
 				continue;
 
-			peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
 			continue;
 		}
 
 		uint16_t incumbent = UBI_LEB_UNMAPPED;
 
-		ret = leb_mapping_get(ubi, vid->vol_id, vid->lnum, &incumbent);
+		ret = ubi_volume_leb_get(ubi, vid->vol_id, vid->lnum,
+					 &incumbent);
 
 		if (0 != ret) {
 			LOG_WRN("PEB %u: claims volume %u block %u, which the "
@@ -821,7 +540,7 @@ static void scan_second_pass(struct ubi_device *ubi)
 				pnum, vid->vol_id, vid->lnum, ret);
 			event_emit(ubi, UBI_EVENT_LEB_ORPHANED, pnum,
 				   vid->vol_id, vid->lnum);
-			peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
 			continue;
 		}
 
@@ -844,39 +563,29 @@ static void scan_second_pass(struct ubi_device *ubi)
 				"PEB %u; PEB %u is the older copy",
 				vid->vol_id, vid->lnum, incumbent, pnum, stale);
 
-			peb_state_set(ubi, stale, UBI_PEB_RECLAIM);
+			ubi_peb_state_set(ubi, stale, UBI_PEB_RECLAIM);
 
 			if (stale == pnum)
 				continue;
 		}
 
-		ret = leb_mapping_set(ubi, vid->vol_id, vid->lnum,
-				      (uint16_t)pnum);
+		ret = ubi_volume_leb_set(ubi, vid->vol_id, vid->lnum,
+					 (uint16_t)pnum);
 
 		if (0 != ret) {
 			LOG_WRN("PEB %u: volume %u block %u went away between "
 				"the two lookups (%d)",
 				pnum, vid->vol_id, vid->lnum, ret);
-			peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
 		}
 	}
 }
 
 /* Module interface function definitions ----------------------------------- */
 
-size_t ubi_device_size(void)
+int ubi_device_format_partition(const struct ubi_config *config)
 {
-	return sizeof(struct ubi_device);
-}
-
-int ubi_device_format(const struct ubi_config *config)
-{
-	int ret = config_validate(config);
-
-	if (0 != ret) {
-		LOG_ERR("format needs a key handle and both callbacks");
-		return ret;
-	}
+	int ret = 0;
 
 	/*
 	 * Formatting has no attached device, but it needs the same partition,
@@ -955,7 +664,7 @@ int ubi_device_format(const struct ubi_config *config)
 		if (UBI_VOLUME_TABLE_LEB_COUNT == written)
 			break;
 
-		ret = peb_prepare(ubi, pnum, &history_lost);
+		ret = ubi_peb_prepare(ubi, pnum, &history_lost);
 
 		if (0 != ret) {
 			LOG_WRN("PEB %u cannot be prepared (%d), trying the "
@@ -1005,26 +714,12 @@ int ubi_device_format(const struct ubi_config *config)
 	return 0;
 }
 
-int ubi_device_init(struct ubi_device *ubi, const struct ubi_config *config)
+int ubi_device_attach(struct ubi_device *ubi, const struct ubi_config *config)
 {
-	if (NULL == ubi) {
-		LOG_ERR("attach needs a device handle");
-		return -EINVAL;
-	}
-
-	if (UBI_DEVICE_MAGIC == ubi->magic) {
-		LOG_ERR("this handle is already attached");
-		return -EBUSY;
-	}
-
-	int ret = config_validate(config);
-
-	if (0 != ret) {
-		LOG_ERR("attach needs a key handle and both callbacks");
-		return ret;
-	}
+	int ret = 0;
 
 	memset(ubi, 0, sizeof(*ubi));
+	k_mutex_init(&ubi->lock);
 
 	ubi->callbacks.event = config->event_cb;
 	ubi->callbacks.state = config->state_cb;
@@ -1142,7 +837,7 @@ int ubi_device_init(struct ubi_device *ubi, const struct ubi_config *config)
 	ubi->volumes.revision = record.revision;
 	ubi->volume_table.current = adopted;
 
-	ret = volumes_build(ubi, &record);
+	ret = ubi_volumes_build(ubi, &record);
 
 	if (0 != ret) {
 		LOG_ERR("the volume table declares more logical blocks than "
@@ -1153,7 +848,7 @@ int ubi_device_init(struct ubi_device *ubi, const struct ubi_config *config)
 
 	scan_second_pass(ubi);
 
-	ret = state_check(ubi);
+	ret = ubi_state_check(ubi);
 
 	if (0 != ret) {
 		LOG_ERR("partition %u: the state check refused this device",
@@ -1178,34 +873,10 @@ exit:
 	return ret;
 }
 
-int ubi_device_deinit(struct ubi_device *ubi)
+void ubi_device_detach(struct ubi_device *ubi)
 {
-	if (NULL == ubi || UBI_DEVICE_MAGIC != ubi->magic) {
-		LOG_ERR("this handle is not attached");
-		return -EINVAL;
-	}
-
 	device_tables_free(ubi);
 	device_close(ubi);
 
 	memset(ubi, 0, sizeof(*ubi));
-
-	return 0;
-}
-
-int ubi_device_get_info(struct ubi_device *ubi, struct ubi_device_info *info)
-{
-	if (NULL == ubi || UBI_DEVICE_MAGIC != ubi->magic || NULL == info) {
-		LOG_ERR("device info needs an attached handle");
-		return -EINVAL;
-	}
-
-	const int ret = device_info_fill(ubi, info);
-
-	if (0 != ret) {
-		LOG_ERR("the block state table is not one this build wrote");
-		return ret;
-	}
-
-	return 0;
 }

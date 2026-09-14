@@ -6,7 +6,13 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
 project(ubi_unit)
 
-target_sources(app PRIVATE src/main.c)
+target_sources(app PRIVATE
+  src/common.c
+  src/suite.c
+  src/test_header.c
+  src/test_key.c
+  src/test_tag.c
+)
 
 # Header serialization and key derivation have no public API of their own, so
 # the unit tests reach them through the library's internal header. No test

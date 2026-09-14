@@ -25,6 +25,7 @@
 /* UBI headers: */
 #include "ubi_io.h"
 #include "ubi_key.h"
+#include "ubi_peb.h"
 #include "ubi_private.h"
 #include "ubi_volume_table.h"
 
@@ -366,6 +367,70 @@ int ubi_volume_table_write(struct ubi_device *ubi, uint32_t lnum,
 
 	ubi->global_sqnum = vid.sqnum;
 	ubi->volume_table.sqnum[lnum] = vid.sqnum;
+
+	return 0;
+}
+
+int ubi_volume_table_commit(struct ubi_device *ubi,
+			    const struct ubi_volume_table_record *record)
+{
+	if (NULL == ubi || NULL == record) {
+		LOG_ERR("committing the volume table got bad arguments");
+		return -EINVAL;
+	}
+
+	const uint32_t spare =
+		(ubi->volume_table.current + 1) % UBI_VOLUME_TABLE_LEB_COUNT;
+	const uint32_t order[UBI_VOLUME_TABLE_LEB_COUNT] = {
+		spare, ubi->volume_table.current
+	};
+
+	for (uint32_t i = 0; i < UBI_VOLUME_TABLE_LEB_COUNT; ++i) {
+		const uint32_t lnum = order[i];
+		bool history_lost = false;
+		int ret = 0;
+
+		if (UBI_LEB_UNMAPPED == ubi->volume_table.eba[lnum]) {
+			uint32_t pnum = 0;
+
+			ret = ubi_peb_allocate(ubi, &pnum);
+
+			if (0 != ret) {
+				LOG_ERR("no block to hold volume table copy "
+					"%u (%d)",
+					lnum, ret);
+				return ret;
+			}
+
+			ubi->volume_table.eba[lnum] = (uint16_t)pnum;
+		}
+
+		const uint32_t pnum = ubi->volume_table.eba[lnum];
+
+		ret = ubi_peb_prepare(ubi, pnum, &history_lost);
+
+		if (0 != ret) {
+			LOG_ERR("PEB %u cannot take volume table copy %u (%d)",
+				pnum, lnum, ret);
+			ubi->volume_table.eba[lnum] = UBI_LEB_UNMAPPED;
+			return ret;
+		}
+
+		ret = ubi_volume_table_write(ubi, lnum, record);
+
+		if (0 != ret) {
+			LOG_ERR("PEB %u cannot hold volume table copy %u (%d)",
+				pnum, lnum, ret);
+			ubi->volume_table.eba[lnum] = UBI_LEB_UNMAPPED;
+			return ret;
+		}
+
+		ubi_peb_state_set(ubi, pnum, UBI_PEB_MAPPED);
+
+		/* The freshly written copy is the one in force from here on,
+		 * so an interruption of the second write loses nothing. */
+		ubi->volume_table.current = lnum;
+	}
 
 	return 0;
 }

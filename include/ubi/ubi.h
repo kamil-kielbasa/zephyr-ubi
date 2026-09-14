@@ -161,8 +161,21 @@ struct ubi_device_info {
 	uint32_t free_pebs;
 	/** Released, awaiting #UBI_MAINTENANCE_RECLAIM before reuse. */
 	uint32_t reclaimable_pebs;
+	/** Worn far enough below \p max_erase_count that
+	 *  #UBI_MAINTENANCE_RELOCATE would move their contents elsewhere. */
+	uint32_t relocatable_pebs;
 	/** Retired after tampering or a persistent I/O error, never reused. */
 	uint32_t bad_pebs;
+
+	/**
+	 * Logical erase blocks the volumes may still claim between them.
+	 *
+	 * The physical counts above say what can be written now; this says
+	 * how much \ref ubi_volume_create and \ref ubi_volume_resize have
+	 * left to give. The two differ: a reserved LEB costs nothing
+	 * physical until it is first written.
+	 */
+	uint32_t free_lebs;
 
 	/** Volumes currently defined. */
 	uint32_t volume_count;
@@ -173,7 +186,8 @@ struct ubi_device_info {
 	/** Lowest erase count across the device. */
 	uint32_t min_erase_count;
 	/** Highest erase count across the device. A wide spread against
-	 *  \p min_erase_count means #UBI_MAINTENANCE_RELOCATE is due. */
+	 *  \p min_erase_count means #UBI_MAINTENANCE_RELOCATE is due;
+	 *  \p relocatable_pebs says how much it would have to do. */
 	uint32_t max_erase_count;
 
 	/** Revision of the volume table, incremented on every change to it. */
@@ -535,12 +549,13 @@ int ubi_device_get_info(struct ubi_device *ubi, struct ubi_device_info *info);
  *
  * \param[in,out] ubi                   Attached device.
  * \param[in] config                    Name and size.
- * \param[out] vol_id                   Assigned identifier, or \c NULL.
+ * \param[out] vol_id                   Assigned identifier.
  *
  * \retval 0
  *         Created.
  * \retval -EINVAL
- *         \p ubi is not attached, or the name is empty or too long.
+ *         \p ubi is not attached, the name is empty or too long, or the size
+ *         is zero.
  * \retval -EEXIST
  *         A volume with that name already exists.
  * \retval -ENOSPC
@@ -550,6 +565,42 @@ int ubi_device_get_info(struct ubi_device *ubi, struct ubi_device_info *info);
  */
 int ubi_volume_create(struct ubi_device *ubi,
 		      const struct ubi_volume_config *config, uint32_t *vol_id);
+
+/**
+ * \brief Give a volume a new size in logical blocks.
+ *
+ *        Every volume is dynamic: what \ref ubi_volume_create reserved is a
+ *        claim on the shared pool, not a fence. Growing takes more of what is
+ *        left of that pool; shrinking hands blocks back to it.
+ *
+ *        Growing reserves the blocks without allocating any physical ones,
+ *        exactly as creating does, and the blocks that appear are unmapped.
+ *        Shrinking is refused while any logical block above \p leb_count is
+ *        still mapped, so no data is lost to a mistyped size; unmap the tail
+ *        first if that is what you meant.
+ *
+ *        The volume table is rewritten atomically, so an interruption leaves
+ *        either the old size or the new one.
+ *
+ * \param[in,out] ubi                   Attached device.
+ * \param vol_id                        Volume to resize.
+ * \param leb_count                     New size, at least one block.
+ *
+ * \retval 0
+ *         Resized, or already that size.
+ * \retval -EINVAL
+ *         \p ubi is not attached, or \p leb_count is zero.
+ * \retval -ENOENT
+ *         No such volume.
+ * \retval -EBUSY
+ *         A logical block above \p leb_count is still mapped.
+ * \retval -ENOSPC
+ *         The pool has fewer logical blocks left than the growth asks for.
+ * \retval -EIO
+ *         Flash driver failure.
+ */
+int ubi_volume_resize(struct ubi_device *ubi, uint32_t vol_id,
+		      uint32_t leb_count);
 
 /**
  * \brief Remove a volume and release its blocks.

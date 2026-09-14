@@ -119,6 +119,20 @@ int config_volume_open(void)
 Creating a volume reserves logical blocks but claims no physical ones. Blocks leave the
 pool only on the first write.
 
+Every volume is dynamic, so that reservation is a claim on the shared pool rather than a
+fence. `ubi_volume_resize` takes more of what is left or hands blocks back:
+
+```c
+int config_volume_grow(uint32_t leb_count)
+{
+	return ubi_volume_resize(ubi, cfg_vol, leb_count);
+}
+```
+
+Growing is refused with `-ENOSPC` when the pool has less left than you ask for. Shrinking
+is refused with `-EBUSY` while any logical block above the new size is still mapped, so a
+mistyped size cannot cost you data — unmap the tail first if that is what you meant.
+
 ---
 
 ## 5. Whole-block writes — `ubi_leb_change`

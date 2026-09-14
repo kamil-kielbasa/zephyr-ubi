@@ -11,10 +11,14 @@ if(CONFIG_UBI)
   zephyr_library_include_directories(library)
 
   zephyr_library_sources(
+    library/ubi_api.c
     library/ubi_device.c
     library/ubi_header.c
     library/ubi_io.c
     library/ubi_key.c
+    library/ubi_peb.c
+    library/ubi_state.c
+    library/ubi_volume.c
     library/ubi_volume_table.c
   )
 

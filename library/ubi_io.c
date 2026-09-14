@@ -79,7 +79,7 @@ int ubi_io_read(const struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
 	return 0;
 }
 
-int ubi_io_write(const struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
+int ubi_io_write(struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
 		 const uint8_t *buffer, size_t length)
 {
 	if (NULL == ubi || NULL == ubi->flash_area || NULL == buffer ||
@@ -108,6 +108,8 @@ int ubi_io_write(const struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
 			length, offset, ret);
 		return -EIO;
 	}
+
+	ubi->writes_since_check += 1;
 
 	return 0;
 }

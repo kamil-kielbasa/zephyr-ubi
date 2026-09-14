@@ -6,4 +6,11 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
 project(ubi_integration)
 
-target_sources(app PRIVATE src/main.c)
+target_sources(app PRIVATE
+  src/common.c
+  src/suite.c
+  src/test_attach.c
+  src/test_integrity.c
+  src/test_trust.c
+  src/test_volume.c
+)

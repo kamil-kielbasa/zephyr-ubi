@@ -50,7 +50,9 @@ int ubi_io_read(const struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
 /**
  * \brief Write bytes into one physical erase block.
  *
- * \param[in] ubi                       Device holding the partition.
+ * \param[in,out] ubi                   Device holding the partition; its
+ *                                      count of writes since the last state
+ *                                      check goes up by one.
  * \param pnum                          Physical erase block to write.
  * \param offset                        Byte offset within that block.
  * \param[in] buffer                    Bytes to write.
@@ -63,7 +65,7 @@ int ubi_io_read(const struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
  * \retval -EIO
  *         The flash driver failed.
  */
-int ubi_io_write(const struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
+int ubi_io_write(struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
 		 const uint8_t *buffer, size_t length);
 
 /**

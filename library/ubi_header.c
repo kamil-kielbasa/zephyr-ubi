@@ -540,7 +540,7 @@ int ubi_headers_read(const struct ubi_device *ubi, uint32_t pnum,
 	return 0;
 }
 
-int ubi_ec_header_write(const struct ubi_device *ubi, uint32_t pnum,
+int ubi_ec_header_write(struct ubi_device *ubi, uint32_t pnum,
 			const struct ubi_ec_header *header)
 {
 	uint8_t buffer[UBI_HEADER_SIZE] = { 0 };
@@ -565,7 +565,7 @@ int ubi_ec_header_write(const struct ubi_device *ubi, uint32_t pnum,
 	return 0;
 }
 
-int ubi_vid_header_write(const struct ubi_device *ubi, uint32_t pnum,
+int ubi_vid_header_write(struct ubi_device *ubi, uint32_t pnum,
 			 const struct ubi_vid_header *header)
 {
 	uint8_t buffer[UBI_HEADER_SIZE] = { 0 };

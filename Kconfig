@@ -41,14 +41,14 @@ config UBI_VERIFY_ON_READ
           extra flash read plus a CMAC on the hottest path.
 
 config UBI_STATE_CHECK_INTERVAL
-        int "Metadata writes between state checks"
+        int "Flash writes between state checks"
         default 64
-        range 1 65535
+        range 1 1024
         help
-          UBI counts the erase counter headers, volume identifier headers and
-          volume table records it writes. Once this many have gone by, the
-          state callback is consulted before the next operation that would
-          write, so that a refusal can be honoured with nothing written.
+          UBI counts every write it makes to the flash. Once this many have
+          gone by, the state callback is consulted before the next operation
+          that would write, so that a refusal can be honoured with nothing
+          written.
 
           The callback is always consulted at the end of an attach; this only
           decides how often it is consulted afterwards, so that a long uptime
