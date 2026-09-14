@@ -273,7 +273,7 @@ int ubi_volume_leb_get(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 		return -ENOENT;
 
 	if (lnum >= volume->leb_count)
-		return -ERANGE;
+		return -EINVAL;
 
 	*pnum = volume->eba[lnum];
 
@@ -289,15 +289,16 @@ int ubi_volume_leb_set(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 		return -ENOENT;
 
 	if (lnum >= volume->leb_count)
-		return -ERANGE;
+		return -EINVAL;
 
 	volume->eba[lnum] = pnum;
 
 	return 0;
 }
 
-int ubi_volume_add(struct ubi_device *ubi,
-		   const struct ubi_volume_config *config, uint32_t *vol_id)
+int ubi_impl_volume_create(struct ubi_device *ubi,
+			   const struct ubi_volume_config *config,
+			   uint32_t *vol_id)
 {
 	int ret = volume_name_validate(ubi, config->name);
 
@@ -375,7 +376,7 @@ int ubi_volume_add(struct ubi_device *ubi,
 	return 0;
 }
 
-int ubi_volume_drop(struct ubi_device *ubi, uint32_t vol_id)
+int ubi_impl_volume_remove(struct ubi_device *ubi, uint32_t vol_id)
 {
 	uint32_t index = 0;
 
@@ -427,8 +428,8 @@ int ubi_volume_drop(struct ubi_device *ubi, uint32_t vol_id)
 	return 0;
 }
 
-int ubi_volume_set_size(struct ubi_device *ubi, uint32_t vol_id,
-			uint32_t leb_count)
+int ubi_impl_volume_resize(struct ubi_device *ubi, uint32_t vol_id,
+			   uint32_t leb_count)
 {
 	uint32_t index = 0;
 
@@ -491,8 +492,8 @@ int ubi_volume_set_size(struct ubi_device *ubi, uint32_t vol_id,
 	return 0;
 }
 
-int ubi_volume_by_name(const struct ubi_device *ubi, const char *name,
-		       uint32_t *vol_id)
+int ubi_impl_volume_find(const struct ubi_device *ubi, const char *name,
+			 uint32_t *vol_id)
 {
 	for (uint32_t i = 0; i < ubi->volumes.count; ++i) {
 		if (0 != strcmp(ubi->volumes.entries[i].name, name))
@@ -508,8 +509,8 @@ int ubi_volume_by_name(const struct ubi_device *ubi, const char *name,
 	return -ENOENT;
 }
 
-int ubi_volume_describe(struct ubi_device *ubi, uint32_t vol_id,
-			struct ubi_volume_info *info)
+int ubi_impl_volume_get_info(struct ubi_device *ubi, uint32_t vol_id,
+			     struct ubi_volume_info *info)
 {
 	const struct ubi_volume *volume = ubi_volume_by_id(ubi, vol_id);
 

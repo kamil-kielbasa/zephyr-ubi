@@ -16,6 +16,7 @@ if(CONFIG_UBI)
     library/ubi_header.c
     library/ubi_io.c
     library/ubi_key.c
+    library/ubi_leb.c
     library/ubi_peb.c
     library/ubi_state.c
     library/ubi_volume.c

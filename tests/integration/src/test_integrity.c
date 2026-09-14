@@ -115,8 +115,7 @@ ZTEST(ubi_integration, test_a_damaged_erase_counter_header_is_reported)
 		zassert_ok(flash_area_read(flash_area, at, &byte, 1));
 
 		if (0x01 == byte) {
-			byte = 0x00;
-			zassert_ok(flash_area_write(flash_area, at, &byte, 1));
+			flash_clear_a_bit(flash_area, at);
 			break;
 		}
 	}

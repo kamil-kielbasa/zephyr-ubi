@@ -35,6 +35,7 @@
 #include <ubi/ubi.h>
 
 #include "ubi_device.h"
+#include "ubi_leb.h"
 #include "ubi_private.h"
 #include "ubi_state.h"
 #include "ubi_volume.h"
@@ -107,7 +108,7 @@ int ubi_device_format(const struct ubi_config *config)
 		return ret;
 	}
 
-	return ubi_device_format_partition(config);
+	return ubi_impl_device_format(config);
 }
 
 int ubi_device_init(struct ubi_device *ubi, const struct ubi_config *config)
@@ -131,7 +132,7 @@ int ubi_device_init(struct ubi_device *ubi, const struct ubi_config *config)
 
 	/* Nothing to lock yet: the mutex lives in the handle this call is
 	 * about to build. */
-	return ubi_device_attach(ubi, config);
+	return ubi_impl_device_init(ubi, config);
 }
 
 int ubi_device_deinit(struct ubi_device *ubi)
@@ -143,7 +144,7 @@ int ubi_device_deinit(struct ubi_device *ubi)
 
 	/* Detaching a handle another thread is using is a defect the library
 	 * cannot paper over, so this does not lock either. */
-	ubi_device_detach(ubi);
+	ubi_impl_device_deinit(ubi);
 
 	return 0;
 }
@@ -186,7 +187,7 @@ int ubi_volume_create(struct ubi_device *ubi,
 		goto unlock;
 	}
 
-	ret = ubi_volume_add(ubi, config, vol_id);
+	ret = ubi_impl_volume_create(ubi, config, vol_id);
 
 unlock:
 	k_mutex_unlock(&ubi->lock);
@@ -216,7 +217,7 @@ int ubi_volume_resize(struct ubi_device *ubi, uint32_t vol_id,
 		goto unlock;
 	}
 
-	ret = ubi_volume_set_size(ubi, vol_id, leb_count);
+	ret = ubi_impl_volume_resize(ubi, vol_id, leb_count);
 
 unlock:
 	k_mutex_unlock(&ubi->lock);
@@ -243,7 +244,7 @@ int ubi_volume_remove(struct ubi_device *ubi, uint32_t vol_id)
 		goto unlock;
 	}
 
-	ret = ubi_volume_drop(ubi, vol_id);
+	ret = ubi_impl_volume_remove(ubi, vol_id);
 
 unlock:
 	k_mutex_unlock(&ubi->lock);
@@ -261,7 +262,7 @@ int ubi_volume_find(struct ubi_device *ubi, const char *name, uint32_t *vol_id)
 
 	k_mutex_lock(&ubi->lock, K_FOREVER);
 
-	const int ret = ubi_volume_by_name(ubi, name, vol_id);
+	const int ret = ubi_impl_volume_find(ubi, name, vol_id);
 
 	k_mutex_unlock(&ubi->lock);
 
@@ -280,7 +281,193 @@ int ubi_volume_get_info(struct ubi_device *ubi, uint32_t vol_id,
 
 	k_mutex_lock(&ubi->lock, K_FOREVER);
 
-	const int ret = ubi_volume_describe(ubi, vol_id, info);
+	const int ret = ubi_impl_volume_get_info(ubi, vol_id, info);
+
+	k_mutex_unlock(&ubi->lock);
+
+	return ret;
+}
+
+int ubi_leb_map(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum)
+{
+	if (!device_is_attached(ubi) || !vol_id_is_public(vol_id)) {
+		LOG_ERR("mapping a block needs an attached handle and an "
+			"identifier the application owns");
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&ubi->lock, K_FOREVER);
+
+	int ret = ubi_state_guard(ubi);
+
+	if (0 != ret) {
+		LOG_ERR("volume %u block %u may not be mapped on a device "
+			"that is no longer trusted",
+			vol_id, lnum);
+		goto unlock;
+	}
+
+	ret = ubi_impl_leb_map(ubi, vol_id, lnum);
+
+unlock:
+	k_mutex_unlock(&ubi->lock);
+
+	return ret;
+}
+
+int ubi_leb_unmap(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum)
+{
+	if (!device_is_attached(ubi) || !vol_id_is_public(vol_id)) {
+		LOG_ERR("unmapping a block needs an attached handle and an "
+			"identifier the application owns");
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&ubi->lock, K_FOREVER);
+
+	int ret = ubi_state_guard(ubi);
+
+	if (0 != ret) {
+		LOG_ERR("volume %u block %u may not be unmapped on a device "
+			"that is no longer trusted",
+			vol_id, lnum);
+		goto unlock;
+	}
+
+	ret = ubi_impl_leb_unmap(ubi, vol_id, lnum);
+
+unlock:
+	k_mutex_unlock(&ubi->lock);
+
+	return ret;
+}
+
+int ubi_leb_erase(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum)
+{
+	if (!device_is_attached(ubi) || !vol_id_is_public(vol_id)) {
+		LOG_ERR("erasing a block needs an attached handle and an "
+			"identifier the application owns");
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&ubi->lock, K_FOREVER);
+
+	int ret = ubi_state_guard(ubi);
+
+	if (0 != ret) {
+		LOG_ERR("volume %u block %u may not be erased on a device "
+			"that is no longer trusted",
+			vol_id, lnum);
+		goto unlock;
+	}
+
+	ret = ubi_impl_leb_erase(ubi, vol_id, lnum);
+
+unlock:
+	k_mutex_unlock(&ubi->lock);
+
+	return ret;
+}
+
+int ubi_leb_read(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
+		 uint32_t offset, void *buffer, size_t length)
+{
+	if (!device_is_attached(ubi) || !vol_id_is_public(vol_id) ||
+	    NULL == buffer) {
+		LOG_ERR("reading a block needs an attached handle, an "
+			"identifier the application owns and a destination");
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&ubi->lock, K_FOREVER);
+
+	/* Reads are served even after the application withdraws its trust:
+	 * it still has to be able to look at what it decided to distrust. */
+	const int ret =
+		ubi_impl_leb_read(ubi, vol_id, lnum, offset, buffer, length);
+
+	k_mutex_unlock(&ubi->lock);
+
+	return ret;
+}
+
+int ubi_leb_change(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
+		   const void *buffer, size_t length)
+{
+	if (!device_is_attached(ubi) || !vol_id_is_public(vol_id) ||
+	    (NULL == buffer && 0 != length)) {
+		LOG_ERR("changing a block needs an attached handle, an "
+			"identifier the application owns and the data");
+		return -EINVAL;
+	}
+
+	if (0 == length)
+		return 0;
+
+	k_mutex_lock(&ubi->lock, K_FOREVER);
+
+	int ret = ubi_state_guard(ubi);
+
+	if (0 != ret) {
+		LOG_ERR("volume %u block %u may not be changed on a device "
+			"that is no longer trusted",
+			vol_id, lnum);
+		goto unlock;
+	}
+
+	ret = ubi_impl_leb_change(ubi, vol_id, lnum, buffer, length);
+
+unlock:
+	k_mutex_unlock(&ubi->lock);
+
+	return ret;
+}
+
+int ubi_leb_write_at(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
+		     uint32_t offset, const void *buffer, size_t length)
+{
+	if (!device_is_attached(ubi) || !vol_id_is_public(vol_id) ||
+	    (NULL == buffer && 0 != length)) {
+		LOG_ERR("appending to a block needs an attached handle, an "
+			"identifier the application owns and the data");
+		return -EINVAL;
+	}
+
+	if (0 == length)
+		return 0;
+
+	k_mutex_lock(&ubi->lock, K_FOREVER);
+
+	int ret = ubi_state_guard(ubi);
+
+	if (0 != ret) {
+		LOG_ERR("volume %u block %u may not be written on a device "
+			"that is no longer trusted",
+			vol_id, lnum);
+		goto unlock;
+	}
+
+	ret = ubi_impl_leb_write_at(ubi, vol_id, lnum, offset, buffer, length);
+
+unlock:
+	k_mutex_unlock(&ubi->lock);
+
+	return ret;
+}
+
+int ubi_leb_get_info(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
+		     struct ubi_leb_info *info)
+{
+	if (!device_is_attached(ubi) || !vol_id_is_public(vol_id) ||
+	    NULL == info) {
+		LOG_ERR("block info needs an attached handle, an identifier "
+			"the application owns and somewhere to put it");
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&ubi->lock, K_FOREVER);
+
+	const int ret = ubi_impl_leb_get_info(ubi, vol_id, lnum, info);
 
 	k_mutex_unlock(&ubi->lock);
 

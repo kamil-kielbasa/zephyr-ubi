@@ -19,6 +19,7 @@
 /* Zephyr headers: */
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/crc.h>
+#include <zephyr/sys/util.h>
 #include <zephyr/ztest.h>
 
 /* UBI headers: */
@@ -55,6 +56,22 @@ void partition_fill(uint8_t value)
 	flash_area_close(flash_area);
 }
 
+void flash_clear_a_bit(const struct flash_area *flash_area, off_t at)
+{
+	const off_t block = ROUND_DOWN(at, UBI_TEST_WRITE_BLOCK);
+	const size_t index = (size_t)(at - block);
+	uint8_t buffer[UBI_TEST_WRITE_BLOCK];
+
+	zassert_equal(UBI_TEST_WRITE_BLOCK, flash_area_align(flash_area),
+		      "the overlay and the driver have to agree");
+	zassert_ok(flash_area_read(flash_area, block, buffer, sizeof(buffer)));
+
+	buffer[index] &= (uint8_t)(buffer[index] - 1U);
+
+	/* The bytes around it go back bit for bit, which NOR always allows. */
+	zassert_ok(flash_area_write(flash_area, block, buffer, sizeof(buffer)));
+}
+
 uint32_t partition_fingerprint(void)
 {
 	const struct flash_area *flash_area = NULL;
@@ -89,8 +106,7 @@ uint32_t corrupt_volume_tables(struct ubi_device *ubi,
 
 	zassert_ok(flash_area_open(TEST_PARTITION, &flash_area));
 
-	/* The record sits behind the two headers of whichever block holds it;
-	 * clearing the lowest set bit is a write NOR always allows. */
+	/* The record sits behind the two headers of whichever block holds it. */
 	for (uint32_t pnum = 0; pnum < info.peb_count && damaged < copies;
 	     ++pnum) {
 		const off_t at = (off_t)pnum * info.peb_size + 128;
@@ -98,10 +114,63 @@ uint32_t corrupt_volume_tables(struct ubi_device *ubi,
 		zassert_ok(flash_area_read(flash_area, at, &byte, 1));
 
 		if (0xFF != byte && 0x00 != byte) {
-			byte &= (uint8_t)(byte - 1U);
-			zassert_ok(flash_area_write(flash_area, at, &byte, 1));
+			flash_clear_a_bit(flash_area, at);
 			damaged += 1;
 		}
+	}
+
+	flash_area_close(flash_area);
+
+	return damaged;
+}
+
+static off_t data_find(const struct flash_area *flash_area,
+		       const uint8_t *needle, size_t length, off_t from)
+{
+	uint8_t chunk[SWEEP_CHUNK];
+	const size_t compared = MIN(sizeof(chunk), length);
+
+	for (off_t at = from; at < (off_t)flash_area->fa_size;
+	     at += UBI_TEST_PEB_SIZE) {
+		zassert_ok(flash_area_read(flash_area, at, chunk, compared));
+
+		if (0 == memcmp(chunk, needle, compared))
+			return at;
+	}
+
+	return -1;
+}
+
+uint32_t count_data_matching(const uint8_t *needle, size_t length)
+{
+	const struct flash_area *flash_area = NULL;
+	uint32_t found = 0;
+	off_t at = UBI_TEST_DATA_OFFSET;
+
+	zassert_ok(flash_area_open(TEST_PARTITION, &flash_area));
+
+	while (0 <= (at = data_find(flash_area, needle, length, at))) {
+		found += 1;
+		at += UBI_TEST_PEB_SIZE;
+	}
+
+	flash_area_close(flash_area);
+
+	return found;
+}
+
+uint32_t corrupt_data_matching(const uint8_t *needle, size_t length)
+{
+	const struct flash_area *flash_area = NULL;
+	uint32_t damaged = 0;
+	off_t at = UBI_TEST_DATA_OFFSET;
+
+	zassert_ok(flash_area_open(TEST_PARTITION, &flash_area));
+
+	while (0 <= (at = data_find(flash_area, needle, length, at))) {
+		flash_clear_a_bit(flash_area, at);
+		damaged += 1;
+		at += UBI_TEST_PEB_SIZE;
 	}
 
 	flash_area_close(flash_area);

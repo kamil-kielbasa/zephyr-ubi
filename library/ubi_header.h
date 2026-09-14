@@ -327,4 +327,26 @@ int ubi_ec_header_write(struct ubi_device *ubi, uint32_t pnum,
 int ubi_vid_header_write(struct ubi_device *ubi, uint32_t pnum,
 			 const struct ubi_vid_header *header);
 
+/**
+ * \brief Check a block's data area against what its VID header promises.
+ *
+ *        Only a header with \p copy_flag promises anything: it was sealed
+ *        after its data was down, so a length and a checksum that do not
+ *        match mean a power loss cut the write short. Without the flag the
+ *        data area is the caller's business and this succeeds.
+ *
+ * \param[in] ubi                       Device holding the partition.
+ * \param pnum                          Physical erase block to check.
+ * \param[in] header                    Header that was read from it.
+ *
+ * \retval 0
+ *         Intact, or nothing was promised.
+ * \retval -EBADMSG
+ *         The write was interrupted; the block carries partial data.
+ * \retval -EIO
+ *         The flash driver failed.
+ */
+int ubi_vid_header_data_verify(const struct ubi_device *ubi, uint32_t pnum,
+			       const struct ubi_vid_header *header);
+
 #endif /* UBI_HEADER_H */

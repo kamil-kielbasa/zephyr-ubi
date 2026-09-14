@@ -24,6 +24,48 @@
 #include "common.h"
 #include "suite.h"
 
+/* Module defines ---------------------------------------------------------- */
+
+/** Bytes written into a logical block when a test needs to tell them apart. */
+#define LEB_PATTERN_SIZE (64)
+
+/* Static function definitions --------------------------------------------- */
+
+/**
+ * \brief Write a pattern the block number decides into a range of blocks.
+ */
+static void volume_fill(uint32_t vol_id, uint32_t from, uint32_t to,
+			uint8_t seed)
+{
+	uint8_t written[LEB_PATTERN_SIZE];
+
+	for (uint32_t lnum = from; lnum < to; ++lnum) {
+		memset(written, (uint8_t)(seed + lnum), sizeof(written));
+		zassert_ok(ubi_leb_change(ubi, vol_id, lnum, written,
+					  sizeof(written)));
+	}
+}
+
+/**
+ * \brief Read every block of a volume back and insist on finding it whole.
+ */
+static void volume_verify(uint32_t vol_id, uint32_t leb_count, uint8_t seed)
+{
+	uint8_t expected[LEB_PATTERN_SIZE];
+	uint8_t read[LEB_PATTERN_SIZE];
+
+	for (uint32_t lnum = 0; lnum < leb_count; ++lnum) {
+		memset(expected, (uint8_t)(seed + lnum), sizeof(expected));
+		memset(read, 0x00, sizeof(read));
+
+		zassert_ok(
+			ubi_leb_read(ubi, vol_id, lnum, 0, read, sizeof(read)));
+		zassert_mem_equal(expected, read, sizeof(read),
+				  "volume %u block %u lost its contents",
+				  vol_id, lnum);
+	}
+}
+
 /* Module interface function definitions ----------------------------------- */
 
 ZTEST(ubi_integration, test_a_created_volume_survives_a_reattach)
@@ -498,6 +540,127 @@ ZTEST(ubi_integration, test_the_logical_budget_follows_the_volumes)
 	zassert_ok(ubi_volume_remove(ubi, vol_id));
 	zassert_ok(ubi_device_get_info(ubi, &info));
 	zassert_equal(budget - 10, info.free_lebs, "removing gives it back");
+
+	zassert_ok(ubi_device_deinit(ubi));
+}
+
+ZTEST(ubi_integration, test_removing_a_volume_keeps_the_others_mappings)
+{
+	const struct ubi_volume_config wanted[] = {
+		{ .name = "a", .leb_count = 2 },
+		{ .name = "b", .leb_count = 3 },
+		{ .name = "c", .leb_count = 4 },
+	};
+	uint32_t vol_id[ARRAY_SIZE(wanted)] = { 0 };
+
+	zassert_ok(ubi_device_format(&config));
+	zassert_ok(ubi_device_init(ubi, &config));
+
+	for (size_t i = 0; i < ARRAY_SIZE(wanted); ++i) {
+		zassert_ok(ubi_volume_create(ubi, &wanted[i], &vol_id[i]));
+		volume_fill(vol_id[i], 0, wanted[i].leb_count,
+			    (uint8_t)(0xA0 + 0x10 * i));
+	}
+
+	zassert_ok(ubi_volume_remove(ubi, vol_id[1]));
+
+	/* The survivors' slices of the mapping table moved; every block they
+	 * hold has to have moved with them. */
+	volume_verify(vol_id[0], wanted[0].leb_count, 0xA0);
+	volume_verify(vol_id[2], wanted[2].leb_count, 0xC0);
+
+	zassert_ok(ubi_device_deinit(ubi));
+	zassert_ok(ubi_device_init(ubi, &config));
+
+	volume_verify(vol_id[0], wanted[0].leb_count, 0xA0);
+	volume_verify(vol_id[2], wanted[2].leb_count, 0xC0);
+
+	zassert_ok(ubi_device_deinit(ubi));
+}
+
+ZTEST(ubi_integration, test_resizing_a_volume_keeps_the_others_mappings)
+{
+	const struct ubi_volume_config wanted[] = {
+		{ .name = "a", .leb_count = 2 },
+		{ .name = "b", .leb_count = 3 },
+		{ .name = "c", .leb_count = 4 },
+	};
+	uint32_t vol_id[ARRAY_SIZE(wanted)] = { 0 };
+
+	zassert_ok(ubi_device_format(&config));
+	zassert_ok(ubi_device_init(ubi, &config));
+
+	for (size_t i = 0; i < ARRAY_SIZE(wanted); ++i) {
+		zassert_ok(ubi_volume_create(ubi, &wanted[i], &vol_id[i]));
+		volume_fill(vol_id[i], 0, wanted[i].leb_count,
+			    (uint8_t)(0xA0 + 0x10 * i));
+	}
+
+	/* Growing the middle one pushes both neighbours' slices along. */
+	zassert_ok(ubi_volume_resize(ubi, vol_id[1], 6));
+
+	/* The blocks that appear must be the volume's own and empty, not
+	 * whatever the neighbour's mappings left in those slots. */
+	for (uint32_t lnum = wanted[1].leb_count; lnum < 6; ++lnum) {
+		struct ubi_leb_info info = { 0 };
+
+		zassert_ok(ubi_leb_get_info(ubi, vol_id[1], lnum, &info));
+		zassert_false(info.mapped,
+			      "block %u came with somebody else's mapping",
+			      lnum);
+	}
+
+	volume_fill(vol_id[1], wanted[1].leb_count, 6, 0xB0);
+
+	volume_verify(vol_id[0], wanted[0].leb_count, 0xA0);
+	volume_verify(vol_id[1], 6, 0xB0);
+	volume_verify(vol_id[2], wanted[2].leb_count, 0xC0);
+
+	/* Shrinking pulls them back, and what stays has to still read. */
+	for (uint32_t lnum = 2; lnum < 6; ++lnum)
+		zassert_ok(ubi_leb_unmap(ubi, vol_id[1], lnum));
+
+	zassert_ok(ubi_volume_resize(ubi, vol_id[1], 2));
+
+	volume_verify(vol_id[0], wanted[0].leb_count, 0xA0);
+	volume_verify(vol_id[1], 2, 0xB0);
+	volume_verify(vol_id[2], wanted[2].leb_count, 0xC0);
+
+	zassert_ok(ubi_device_deinit(ubi));
+	zassert_ok(ubi_device_init(ubi, &config));
+
+	volume_verify(vol_id[0], wanted[0].leb_count, 0xA0);
+	volume_verify(vol_id[1], 2, 0xB0);
+	volume_verify(vol_id[2], wanted[2].leb_count, 0xC0);
+
+	zassert_ok(ubi_device_deinit(ubi));
+}
+
+ZTEST(ubi_integration, test_shrinking_over_a_mapped_block_is_refused)
+{
+	const struct ubi_volume_config wanted = { .name = "logs",
+						  .leb_count = 4 };
+	struct ubi_volume_info info = { 0 };
+	uint32_t vol_id = UBI_VOL_ID_INVALID;
+	uint8_t written[64];
+
+	memset(written, 0xC7, sizeof(written));
+
+	zassert_ok(ubi_device_format(&config));
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_ok(ubi_volume_create(ubi, &wanted, &vol_id));
+
+	zassert_ok(ubi_leb_change(ubi, vol_id, 3, written, sizeof(written)));
+
+	zassert_equal(-EBUSY, ubi_volume_resize(ubi, vol_id, 2),
+		      "the tail still carries data");
+
+	zassert_ok(ubi_volume_get_info(ubi, vol_id, &info));
+	zassert_equal(4, info.leb_count, "a refusal has to change nothing");
+
+	/* Say so explicitly and the tail may go. */
+	zassert_ok(ubi_leb_unmap(ubi, vol_id, 3));
+	zassert_ok(ubi_volume_resize(ubi, vol_id, 2));
 
 	zassert_ok(ubi_device_deinit(ubi));
 }

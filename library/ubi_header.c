@@ -41,6 +41,9 @@ LOG_MODULE_REGISTER(ubi, CONFIG_UBI_LOG_LEVEL);
 /** Only dynamic volumes exist; static ones were dropped by design. */
 #define UBI_VID_TYPE_DYNAMIC (1)
 
+/** Bytes read at a time when checksumming a block's data area. */
+#define DATA_VERIFY_CHUNK (128)
+
 /*
  * Field offsets. Every field Linux UBI interprets sits where Linux puts it;
  * the tag occupies bytes Linux reserves as padding.
@@ -586,6 +589,40 @@ int ubi_vid_header_write(struct ubi_device *ubi, uint32_t pnum,
 			pnum, ret);
 		return ret;
 	}
+
+	return 0;
+}
+
+int ubi_vid_header_data_verify(const struct ubi_device *ubi, uint32_t pnum,
+			       const struct ubi_vid_header *header)
+{
+	if (!header->copy_flag)
+		return 0;
+
+	if (header->data_size > ubi->geometry.leb_size) {
+		LOG_ERR("PEB %u: claims %u bytes of data, more than the %u a "
+			"logical block holds",
+			pnum, header->data_size, ubi->geometry.leb_size);
+		return -EBADMSG;
+	}
+
+	uint8_t chunk[DATA_VERIFY_CHUNK] = { 0 };
+	uint32_t crc = 0;
+
+	for (uint32_t at = 0; at < header->data_size; at += sizeof(chunk)) {
+		const size_t length =
+			MIN(sizeof(chunk), header->data_size - at);
+		const int ret = ubi_io_read(ubi, pnum, UBI_DATA_OFFSET + at,
+					    chunk, length);
+
+		if (0 != ret)
+			return ret;
+
+		crc = crc32_ieee_update(crc, chunk, length);
+	}
+
+	if (crc != header->data_crc)
+		return -EBADMSG;
 
 	return 0;
 }

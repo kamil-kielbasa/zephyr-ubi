@@ -1,4 +1,7 @@
 tests:
+  # The stock simulator: one byte per write, so nothing has to be aligned or
+  # padded. Every other scenario exists because that is not what real parts
+  # do.
   ubi.integration:
     platform_allow:
       - native_sim
@@ -6,3 +9,17 @@ tests:
       - ubi
     integration_platforms:
       - native_sim
+  ubi.integration.nrf5340:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_args:
+      - EXTRA_DTC_OVERLAY_FILE=nrf5340.overlay
+  ubi.integration.stm32u5:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_args:
+      - EXTRA_DTC_OVERLAY_FILE=stm32u5.overlay

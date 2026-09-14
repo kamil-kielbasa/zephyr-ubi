@@ -83,7 +83,7 @@ int ubi_volumes_build(struct ubi_device *ubi,
  *         Answered.
  * \retval -ENOENT
  *         No such volume.
- * \retval -ERANGE
+ * \retval -EINVAL
  *         The volume does not reach that far.
  */
 int ubi_volume_leb_get(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
@@ -101,7 +101,7 @@ int ubi_volume_leb_get(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
  *         Mapped.
  * \retval -ENOENT
  *         No such volume.
- * \retval -ERANGE
+ * \retval -EINVAL
  *         The volume does not reach that far.
  */
 int ubi_volume_leb_set(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
@@ -125,8 +125,9 @@ int ubi_volume_leb_set(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
  * \retval -EIO
  *         The crypto backend or the flash driver failed.
  */
-int ubi_volume_add(struct ubi_device *ubi,
-		   const struct ubi_volume_config *config, uint32_t *vol_id);
+int ubi_impl_volume_create(struct ubi_device *ubi,
+			   const struct ubi_volume_config *config,
+			   uint32_t *vol_id);
 
 /**
  * \brief Strike a volume from the volume table and release its blocks.
@@ -141,7 +142,7 @@ int ubi_volume_add(struct ubi_device *ubi,
  * \retval -EIO
  *         The crypto backend or the flash driver failed.
  */
-int ubi_volume_drop(struct ubi_device *ubi, uint32_t vol_id);
+int ubi_impl_volume_remove(struct ubi_device *ubi, uint32_t vol_id);
 
 /**
  * \brief Give a volume a new size, taking from or handing back to the pool.
@@ -161,8 +162,8 @@ int ubi_volume_drop(struct ubi_device *ubi, uint32_t vol_id);
  * \retval -EIO
  *         The crypto backend or the flash driver failed.
  */
-int ubi_volume_set_size(struct ubi_device *ubi, uint32_t vol_id,
-			uint32_t leb_count);
+int ubi_impl_volume_resize(struct ubi_device *ubi, uint32_t vol_id,
+			   uint32_t leb_count);
 
 /**
  * \brief Look up a volume identifier by name, the internal one excluded.
@@ -176,8 +177,8 @@ int ubi_volume_set_size(struct ubi_device *ubi, uint32_t vol_id,
  * \retval -ENOENT
  *         No volume carries that name.
  */
-int ubi_volume_by_name(const struct ubi_device *ubi, const char *name,
-		       uint32_t *vol_id);
+int ubi_impl_volume_find(const struct ubi_device *ubi, const char *name,
+			 uint32_t *vol_id);
 
 /**
  * \brief Take stock of one volume.
@@ -191,7 +192,7 @@ int ubi_volume_by_name(const struct ubi_device *ubi, const char *name,
  * \retval -ENOENT
  *         No such volume.
  */
-int ubi_volume_describe(struct ubi_device *ubi, uint32_t vol_id,
-			struct ubi_volume_info *info);
+int ubi_impl_volume_get_info(struct ubi_device *ubi, uint32_t vol_id,
+			     struct ubi_volume_info *info);
 
 #endif /* UBI_VOLUME_H */

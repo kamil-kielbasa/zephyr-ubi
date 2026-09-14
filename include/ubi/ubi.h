@@ -668,9 +668,9 @@ int ubi_volume_get_info(struct ubi_device *ubi, uint32_t vol_id,
 /**
  * \brief Give a logical erase block a physical one, without writing data.
  *
- *        Required before \ref ubi_leb_write_at. Not required before
- *        \ref ubi_leb_change, which allocates on its own. Mapping an already
- *        mapped LEB succeeds and changes nothing.
+ *        Afterwards the block is mapped and reads as erased, and that much
+ *        survives an unclean reboot. Neither \ref ubi_leb_write_at nor
+ *        \ref ubi_leb_change needs it: both map on their own.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
@@ -682,6 +682,10 @@ int ubi_volume_get_info(struct ubi_device *ubi, uint32_t vol_id,
  *         \p ubi is not attached, or \p lnum is out of range.
  * \retval -ENOENT
  *         No such volume.
+ * \retval -EEXIST
+ *         The block is already mapped. Linux UBI reports this as
+ *         \c -EBADMSG; here that code is reserved for a failed
+ *         authentication and must not also mean a benign state error.
  * \retval -ENOSPC
  *         No physical block available.
  * \retval -EIO
@@ -692,9 +696,16 @@ int ubi_leb_map(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
 /**
  * \brief Detach a logical erase block from its physical one.
  *
- *        The block is queued for #UBI_MAINTENANCE_RECLAIM. Reads of the LEB
- *        afterwards return erased bytes. Unmapping an unmapped LEB succeeds
- *        and changes nothing.
+ *        The block is queued for #UBI_MAINTENANCE_RECLAIM and the mapping is
+ *        dropped from RAM. Reads of the LEB afterwards return erased bytes,
+ *        and the next write takes a different physical block. Unmapping an
+ *        unmapped LEB succeeds and changes nothing.
+ *
+ *        **Nothing is written to the flash.** If the device is detached
+ *        before the queued erase runs, the physical block still carries a
+ *        header naming this LEB and the next attach maps it back. Use
+ *        \ref ubi_leb_erase where that matters. Linux UBI behaves the same
+ *        way and carries the same warning.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
@@ -706,10 +717,34 @@ int ubi_leb_map(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
  *         \p ubi is not attached, or \p lnum is out of range.
  * \retval -ENOENT
  *         No such volume.
- * \retval -EIO
- *         Flash driver failure.
  */
 int ubi_leb_unmap(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
+
+/**
+ * \brief Detach a logical erase block and erase the physical one now.
+ *
+ *        What \ref ubi_leb_unmap promises eventually, this promises on
+ *        return: the physical block is erased and stamped, so the contents
+ *        are gone from the flash and the unmapping survives a reboot. It
+ *        costs one erase, which \ref ubi_leb_unmap does not.
+ *
+ *        Reach for this when the data mattered. Unmapping alone leaves it
+ *        readable to anyone holding the part until a reclaim comes round.
+ *
+ * \param[in,out] ubi                   Attached device.
+ * \param vol_id                        Volume.
+ * \param lnum                          Logical erase block number.
+ *
+ * \retval 0
+ *         Erased, or there was nothing mapped.
+ * \retval -EINVAL
+ *         \p ubi is not attached, or \p lnum is out of range.
+ * \retval -ENOENT
+ *         No such volume.
+ * \retval -EIO
+ *         Flash driver failure; the block is queued for reclaim instead.
+ */
+int ubi_leb_erase(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
 
 /**
  * \brief Read from a logical erase block.
@@ -761,15 +796,18 @@ int ubi_leb_read(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
  * \param lnum                          Logical erase block number.
- * \param[in] buffer                    Data to write.
- * \param length                        Bytes to write, at most the LEB size.
- *                                      Zero leaves the LEB mapped and empty.
+ * \param[in] buffer                    Data to write, padded by the caller
+ *                                      to a whole number of write blocks.
+ * \param length                        Bytes to write, a multiple of the
+ *                                      write block size reported by
+ *                                      \ref ubi_device_get_info and at most
+ *                                      the LEB size. Zero does nothing.
  *
  * \retval 0
- *         The new contents are durable.
+ *         The new contents are durable, or \p length was zero.
  * \retval -EINVAL
- *         \p ubi is not attached, \p lnum is out of range, or \p length
- *         exceeds the LEB size.
+ *         \p ubi is not attached, \p lnum is out of range, \p length
+ *         exceeds the LEB size, or it is not a whole number of write blocks.
  * \retval -ENOENT
  *         No such volume.
  * \retval -ENOSPC
@@ -790,6 +828,8 @@ int ubi_leb_change(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
  *        The contract:
  *        - \p offset and \p length must both be multiples of the write block
  *          size reported by \ref ubi_device_get_info.
+ *        - An unmapped LEB is mapped on the way, so no \ref ubi_leb_map is
+ *          needed first.
  *        - The same region must never be written twice without an
  *          intervening \ref ubi_leb_change or \ref ubi_leb_unmap. On NOR
  *          flash the second write silently corrupts the first and UBI will
@@ -810,16 +850,17 @@ int ubi_leb_change(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
  * \param lnum                          Logical erase block number.
  * \param offset                        Byte offset within the LEB.
  * \param[in] buffer                    Data to write.
- * \param length                        Bytes to write.
+ * \param length                        Bytes to write. Zero does nothing.
  *
  * \retval 0
- *         The bytes were written.
+ *         The bytes were written, or \p length was zero.
  * \retval -EINVAL
  *         \p ubi is not attached, \p lnum is out of range, the range spills
  *         past the end of the LEB, or the alignment rule was broken.
  * \retval -ENOENT
- *         No such volume, or the LEB is not mapped; call \ref ubi_leb_map
- *         first.
+ *         No such volume.
+ * \retval -ENOSPC
+ *         The LEB was unmapped and no physical block was available.
  * \retval -EIO
  *         Flash driver failure.
  */

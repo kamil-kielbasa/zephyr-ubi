@@ -544,6 +544,17 @@ static void scan_second_pass(struct ubi_device *ubi)
 			continue;
 		}
 
+		/* A sealed header promises a length and a checksum over the
+		 * data behind it, so a write cut short by a power loss is
+		 * recognisable here and must not win the block. */
+		if (0 != ubi_vid_header_data_verify(ubi, pnum, vid)) {
+			LOG_WRN("PEB %u: claims volume %u block %u but its data "
+				"was cut short; queued for reclaim",
+				pnum, vid->vol_id, vid->lnum);
+			ubi_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
+			continue;
+		}
+
 		if (UBI_LEB_UNMAPPED != incumbent) {
 			struct ubi_headers other = { 0 };
 			uint64_t incumbent_sqnum = 0;
@@ -583,7 +594,7 @@ static void scan_second_pass(struct ubi_device *ubi)
 
 /* Module interface function definitions ----------------------------------- */
 
-int ubi_device_format_partition(const struct ubi_config *config)
+int ubi_impl_device_format(const struct ubi_config *config)
 {
 	int ret = 0;
 
@@ -714,7 +725,8 @@ int ubi_device_format_partition(const struct ubi_config *config)
 	return 0;
 }
 
-int ubi_device_attach(struct ubi_device *ubi, const struct ubi_config *config)
+int ubi_impl_device_init(struct ubi_device *ubi,
+			 const struct ubi_config *config)
 {
 	int ret = 0;
 
@@ -873,7 +885,7 @@ exit:
 	return ret;
 }
 
-void ubi_device_detach(struct ubi_device *ubi)
+void ubi_impl_device_deinit(struct ubi_device *ubi)
 {
 	device_tables_free(ubi);
 	device_close(ubi);

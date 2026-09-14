@@ -42,20 +42,28 @@ ZTEST(ubi_integration, test_foreign_content_is_not_a_ubi_device)
 ZTEST(ubi_integration, test_format_then_attach)
 {
 	struct ubi_device_info info = { 0 };
+	const struct flash_area *area = NULL;
 
 	zassert_ok(ubi_device_format(&config));
 	zassert_ok(ubi_device_init(ubi, &config));
+
+	zassert_ok(flash_area_open(TEST_PARTITION, &area));
 	zassert_ok(ubi_device_get_info(ubi, &info));
 
-	zassert_equal(128, info.peb_count);
-	zassert_equal(4096, info.peb_size);
-	zassert_equal(4096 - 128, info.leb_size,
+	zassert_equal(area->fa_size / UBI_TEST_PEB_SIZE, info.peb_count,
+		      "the partition has to be divided by the erase block");
+	zassert_equal(UBI_TEST_PEB_SIZE, info.peb_size);
+	zassert_equal(UBI_TEST_PEB_SIZE - UBI_TEST_DATA_OFFSET, info.leb_size,
 		      "two headers precede the data");
-	zassert_equal(1, info.write_block_size);
+	zassert_equal(flash_area_align(area), info.write_block_size,
+		      "the geometry has to come from the driver");
+	zassert_equal(UBI_TEST_WRITE_BLOCK, info.write_block_size);
 	zassert_equal(0, info.volume_count);
 	zassert_not_equal(0, info.image_seq);
 	zassert_equal(1, info.revision);
 	zassert_equal(0, event_count, "a clean attach has nothing to report");
+
+	flash_area_close(area);
 
 	zassert_ok(ubi_device_deinit(ubi));
 }

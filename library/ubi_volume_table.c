@@ -354,9 +354,9 @@ int ubi_volume_table_write(struct ubi_device *ubi, uint32_t lnum,
 	if (0 != ret)
 		return ret;
 
-	ret = ubi_io_write(ubi, pnum, UBI_DATA_OFFSET, buffer,
-			   ROUND_UP(record_size,
-				    ubi->geometry.write_block_size));
+	ret = ubi_io_write_data(ubi, pnum, 0, buffer,
+				ROUND_UP(record_size,
+					 ubi->geometry.write_block_size));
 
 	if (0 != ret) {
 		LOG_ERR("PEB %u: volume table copy %u could not be written "

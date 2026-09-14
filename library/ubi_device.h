@@ -43,7 +43,7 @@
  * \retval -EIO
  *         The crypto backend or the flash driver failed.
  */
-int ubi_device_format_partition(const struct ubi_config *config);
+int ubi_impl_device_format(const struct ubi_config *config);
 
 /**
  * \brief Rebuild a device in RAM from what the partition holds.
@@ -73,13 +73,14 @@ int ubi_device_format_partition(const struct ubi_config *config);
  * \retval -EIO
  *         The flash driver failed.
  */
-int ubi_device_attach(struct ubi_device *ubi, const struct ubi_config *config);
+int ubi_impl_device_init(struct ubi_device *ubi,
+			 const struct ubi_config *config);
 
 /**
  * \brief Give back everything attaching took.
  *
  * \param[in,out] ubi                   Attached device.
  */
-void ubi_device_detach(struct ubi_device *ubi);
+void ubi_impl_device_deinit(struct ubi_device *ubi);
 
 #endif /* UBI_DEVICE_H */

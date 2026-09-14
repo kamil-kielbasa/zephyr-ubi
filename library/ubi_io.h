@@ -22,6 +22,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* UBI headers: */
+#include "ubi_header.h"
+
 /* Types and type definitions ---------------------------------------------- */
 
 struct ubi_device;
@@ -82,5 +85,31 @@ int ubi_io_write(struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
  *         The flash driver failed.
  */
 int ubi_io_erase(const struct ubi_device *ubi, uint32_t pnum);
+
+/**
+ * \brief Read from the data area, counting the offset from where the data
+ *        begins rather than from the start of the block.
+ *
+ *        Same arguments and same returns as \ref ubi_io_read otherwise.
+ *        Linux UBI keeps the same pair for the same reason: the two headers
+ *        in front of the data are nobody else's business.
+ */
+static inline int ubi_io_read_data(const struct ubi_device *ubi, uint32_t pnum,
+				   uint32_t offset, uint8_t *buffer,
+				   size_t length)
+{
+	return ubi_io_read(ubi, pnum, UBI_DATA_OFFSET + offset, buffer, length);
+}
+
+/**
+ * \brief Write to the data area, counting the offset the same way.
+ */
+static inline int ubi_io_write_data(struct ubi_device *ubi, uint32_t pnum,
+				    uint32_t offset, const uint8_t *buffer,
+				    size_t length)
+{
+	return ubi_io_write(ubi, pnum, UBI_DATA_OFFSET + offset, buffer,
+			    length);
+}
 
 #endif /* UBI_IO_H */
