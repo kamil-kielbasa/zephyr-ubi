@@ -127,6 +127,7 @@ static void before_each(void *fixture)
 	zassert_not_null(ubi, "no memory for a device handle");
 	memset(ubi, 0, ubi_device_size());
 
+	flash_fail_writes_never();
 	partition_fill(0xFF);
 }
 

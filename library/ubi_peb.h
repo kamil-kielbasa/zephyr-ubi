@@ -63,14 +63,13 @@ void ubi_peb_state_set(struct ubi_device *ubi, uint32_t pnum,
  *
  * \param[in,out] ubi                   Device holding the partition.
  * \param pnum                          Physical erase block to prepare.
- * \param[out] history_lost             Set when the count had to be guessed.
  *
  * \retval 0
  *         Erased and stamped; the block is now #UBI_PEB_FREE.
  * \retval -EIO
  *         The crypto backend or the flash driver failed.
  */
-int ubi_peb_prepare(struct ubi_device *ubi, uint32_t pnum, bool *history_lost);
+int ubi_peb_prepare(struct ubi_device *ubi, uint32_t pnum);
 
 /**
  * \brief Choose a block to write next and hand it over ready to use.
@@ -92,5 +91,55 @@ int ubi_peb_prepare(struct ubi_device *ubi, uint32_t pnum, bool *history_lost);
  *         The crypto backend or the flash driver failed.
  */
 int ubi_peb_allocate(struct ubi_device *ubi, uint32_t *pnum);
+
+/**
+ * \brief Choose the most worn block that is ready to use.
+ *
+ *        The opposite of \ref ubi_peb_allocate, and deliberately so: wear
+ *        levelling moves data that never changes onto a block that has
+ *        already been erased many times, which frees the barely used one it
+ *        was sitting on for the traffic that does change. Erasing an
+ *        #UBI_PEB_UNKNOWN block to serve this would add wear instead of
+ *        spreading it, so only #UBI_PEB_FREE blocks qualify.
+ *
+ * \param[in,out] ubi                   Attached device.
+ * \param[out] pnum                     Block to use, left #UBI_PEB_FREE.
+ *
+ * \retval 0
+ *         Allocated.
+ * \retval -ENOSPC
+ *         No block is erased and waiting; reclaiming may free some.
+ */
+int ubi_peb_allocate_worn(struct ubi_device *ubi, uint32_t *pnum);
+
+/**
+ * \brief Retire a block that would not take a write or an erase.
+ *
+ *        Held in RAM only, so a reattach gives the block another chance. A
+ *        persistent fault will retire it again; a one-off will not condemn
+ *        it forever.
+ *
+ * \param[in,out] ubi                   Attached device.
+ * \param pnum                          Block to retire.
+ * \param vol_id                        Volume it was serving, or
+ *                                      #UBI_VOL_ID_INVALID.
+ * \param lnum                          Logical block it was serving.
+ */
+void ubi_peb_retire(struct ubi_device *ubi, uint32_t pnum, uint32_t vol_id,
+		    uint32_t lnum);
+
+/**
+ * \brief Write a block off after it refused a second time.
+ *
+ *        \ref ubi_peb_retire leaves a block in line for another attempt;
+ *        this is what that attempt reaches when it fails. Out of service
+ *        until the next attach, and no longer counted as work waiting, so
+ *        that a block which is finished stops costing an erase every time
+ *        the application asks for repairs.
+ *
+ * \param[in,out] ubi                   Attached device.
+ * \param pnum                          Block to write off.
+ */
+void ubi_peb_write_off(struct ubi_device *ubi, uint32_t pnum);
 
 #endif /* UBI_PEB_H */

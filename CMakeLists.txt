@@ -13,9 +13,11 @@ if(CONFIG_UBI)
   zephyr_library_sources(
     library/ubi_api.c
     library/ubi_device.c
+    library/ubi_event.c
     library/ubi_header.c
     library/ubi_io.c
     library/ubi_key.c
+    library/ubi_maintenance.c
     library/ubi_leb.c
     library/ubi_peb.c
     library/ubi_state.c

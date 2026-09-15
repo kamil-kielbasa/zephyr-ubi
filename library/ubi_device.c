@@ -28,6 +28,7 @@
 #include "ubi_io.h"
 #include "ubi_key.h"
 #include "ubi_device.h"
+#include "ubi_event.h"
 #include "ubi_peb.h"
 #include "ubi_private.h"
 #include "ubi_state.h"
@@ -112,12 +113,6 @@ static void device_tables_free(struct ubi_device *ubi);
 
 /** \name Talking to the application */
 /**@{*/
-
-/**
- * \brief Hand an event to the application.
- */
-static void event_emit(const struct ubi_device *ubi, enum ubi_event_type type,
-		       uint32_t pnum, uint32_t vol_id, uint32_t lnum);
 
 /**@}*/
 
@@ -320,19 +315,6 @@ static void device_tables_free(struct ubi_device *ubi)
 	ubi->volumes.eba_pool = NULL;
 }
 
-static void event_emit(const struct ubi_device *ubi, enum ubi_event_type type,
-		       uint32_t pnum, uint32_t vol_id, uint32_t lnum)
-{
-	const struct ubi_event event = {
-		.type = type,
-		.pnum = pnum,
-		.vol_id = vol_id,
-		.lnum = lnum,
-	};
-
-	ubi->callbacks.event(&event, ubi->callbacks.user_context);
-}
-
 static int image_seq_draw(uint32_t *image_seq)
 {
 	/* Zero marks "no image", so a fresh one must not land on it. */
@@ -376,8 +358,8 @@ static void scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable)
 		if (0 != ret) {
 			LOG_WRN("PEB %u: unreadable, retiring it", pnum);
 			ubi_peb_state_set(ubi, pnum, UBI_PEB_BAD);
-			event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
-				   UBI_VOL_ID_INVALID, 0);
+			ubi_event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
+				       UBI_VOL_ID_INVALID, 0);
 			continue;
 		}
 
@@ -391,8 +373,8 @@ static void scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable)
 			continue;
 		case UBI_HEADER_CORRUPT:
 			/* An interrupted stamp, so the block itself is fine. */
-			event_emit(ubi, UBI_EVENT_HDR_CORRUPT, pnum,
-				   UBI_VOL_ID_INVALID, 0);
+			ubi_event_emit(ubi, UBI_EVENT_HDR_CORRUPT, pnum,
+				       UBI_VOL_ID_INVALID, 0);
 			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		case UBI_HEADER_TAMPERED:
@@ -400,14 +382,14 @@ static void scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable)
 			 * hold; counting those apart keeps a mistyped key from
 			 * looking like a blank partition. */
 			*unopenable += 1;
-			event_emit(ubi, UBI_EVENT_HDR_TAMPERED, pnum,
-				   UBI_VOL_ID_INVALID, 0);
+			ubi_event_emit(ubi, UBI_EVENT_HDR_TAMPERED, pnum,
+				       UBI_VOL_ID_INVALID, 0);
 			ubi_peb_state_set(ubi, pnum, UBI_PEB_BAD);
 			continue;
 		case UBI_HEADER_ERROR:
 		default:
-			event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
-				   UBI_VOL_ID_INVALID, 0);
+			ubi_event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
+				       UBI_VOL_ID_INVALID, 0);
 			ubi_peb_state_set(ubi, pnum, UBI_PEB_BAD);
 			continue;
 		}
@@ -427,19 +409,19 @@ static void scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable)
 			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		case UBI_HEADER_CORRUPT:
-			event_emit(ubi, UBI_EVENT_HDR_CORRUPT, pnum,
-				   UBI_VOL_ID_INVALID, 0);
+			ubi_event_emit(ubi, UBI_EVENT_HDR_CORRUPT, pnum,
+				       UBI_VOL_ID_INVALID, 0);
 			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		case UBI_HEADER_TAMPERED:
-			event_emit(ubi, UBI_EVENT_HDR_TAMPERED, pnum,
-				   UBI_VOL_ID_INVALID, 0);
+			ubi_event_emit(ubi, UBI_EVENT_HDR_TAMPERED, pnum,
+				       UBI_VOL_ID_INVALID, 0);
 			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		case UBI_HEADER_ERROR:
 		default:
-			event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
-				   UBI_VOL_ID_INVALID, 0);
+			ubi_event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
+				       UBI_VOL_ID_INVALID, 0);
 			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		}
@@ -538,8 +520,8 @@ static void scan_second_pass(struct ubi_device *ubi)
 				"volume table does not describe (%d); queued "
 				"for reclaim",
 				pnum, vid->vol_id, vid->lnum, ret);
-			event_emit(ubi, UBI_EVENT_LEB_ORPHANED, pnum,
-				   vid->vol_id, vid->lnum);
+			ubi_event_emit(ubi, UBI_EVENT_LEB_ORPHANED, pnum,
+				       vid->vol_id, vid->lnum);
 			ubi_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
 			continue;
 		}
@@ -670,12 +652,10 @@ int ubi_impl_device_format(const struct ubi_config *config)
 	 * two blocks.
 	 */
 	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
-		bool history_lost = false;
-
 		if (UBI_VOLUME_TABLE_LEB_COUNT == written)
 			break;
 
-		ret = ubi_peb_prepare(ubi, pnum, &history_lost);
+		ret = ubi_peb_prepare(ubi, pnum);
 
 		if (0 != ret) {
 			LOG_WRN("PEB %u cannot be prepared (%d), trying the "
@@ -683,11 +663,6 @@ int ubi_impl_device_format(const struct ubi_config *config)
 				pnum, ret);
 			continue;
 		}
-
-		if (history_lost)
-			LOG_WRN("PEB %u: wear history was unreadable, the "
-				"erase count restarts from zero",
-				pnum);
 
 		ubi->volume_table.eba[written] = (uint16_t)pnum;
 
@@ -789,8 +764,10 @@ int ubi_impl_device_init(struct ubi_device *ubi,
 
 		if (0 != ret) {
 			if (-EBADMSG == ret)
-				event_emit(ubi, UBI_EVENT_VOLUME_TABLE_TAMPERED,
-					   pnum, UBI_VOLUME_TABLE_VOL_ID, lnum);
+				ubi_event_emit(ubi,
+					       UBI_EVENT_VOLUME_TABLE_TAMPERED,
+					       pnum, UBI_VOLUME_TABLE_VOL_ID,
+					       lnum);
 
 			LOG_ERR("PEB %u holds volume table copy %u and it is "
 				"unusable (%d)",
@@ -829,9 +806,10 @@ int ubi_impl_device_init(struct ubi_device *ubi,
 		LOG_WRN("partition %u: not every copy of the volume table is "
 			"current, so one erase would cost a revision",
 			config->flash_area_id);
-		event_emit(ubi, UBI_EVENT_VOLUME_TABLE_DEGRADED,
-			   ubi->volume_table.eba[adopted],
-			   UBI_VOLUME_TABLE_VOL_ID, adopted);
+		ubi->volume_table.degraded = true;
+		ubi_event_emit(ubi, UBI_EVENT_VOLUME_TABLE_DEGRADED,
+			       ubi->volume_table.eba[adopted],
+			       UBI_VOLUME_TABLE_VOL_ID, adopted);
 	}
 
 	if (record.peb_size != ubi->geometry.peb_size ||

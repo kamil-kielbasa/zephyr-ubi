@@ -223,6 +223,24 @@ uint32_t ubi_volumes_leb_free(const struct ubi_device *ubi)
 	return volumes_leb_budget(ubi) - ubi->volumes.eba_used;
 }
 
+int ubi_volumes_rewrite(struct ubi_device *ubi)
+{
+	struct ubi_volume_table_record record = { 0 };
+
+	record_from_volumes(ubi, &record);
+
+	const int ret = ubi_volume_table_commit(ubi, &record);
+
+	if (0 != ret) {
+		LOG_ERR("the volume table could not be rewritten (%d)", ret);
+		return ret;
+	}
+
+	volumes_adopt(ubi, &record);
+
+	return 0;
+}
+
 struct ubi_volume *ubi_volume_by_id(struct ubi_device *ubi, uint32_t vol_id)
 {
 	if (UBI_VOLUME_TABLE_VOL_ID == vol_id)

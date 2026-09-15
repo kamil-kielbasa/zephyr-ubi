@@ -14,9 +14,11 @@
 /* Include files ----------------------------------------------------------- */
 
 /* Standard library headers: */
+#include <errno.h>
 #include <string.h>
 
 /* Zephyr headers: */
+#include <zephyr/drivers/flash/flash_simulator.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/sys/util.h>
@@ -32,6 +34,65 @@
 
 /** Chunk used when sweeping the whole partition. */
 #define SWEEP_CHUNK (256)
+
+/* Module variables and constants ------------------------------------------ */
+
+/** Bytes the injected write fault still lets through. */
+static uint32_t writes_left;
+
+/* Static function declarations -------------------------------------------- */
+
+/**
+ * \brief Find the next block whose data area starts with \p needle.
+ *
+ * \return Its offset, or -1 when there is no such block left.
+ */
+static off_t data_find(const struct flash_area *flash_area,
+		       const uint8_t *needle, size_t length, off_t from);
+
+/**
+ * \brief Stand in for a worn out cell: refuse the write once the allowance
+ *        set by \ref flash_fail_writes_after has run out.
+ */
+static int write_byte_fails(const struct device *dev, off_t offset,
+			    uint8_t data);
+
+/* Static function definitions --------------------------------------------- */
+
+static off_t data_find(const struct flash_area *flash_area,
+		       const uint8_t *needle, size_t length, off_t from)
+{
+	uint8_t chunk[SWEEP_CHUNK];
+	const size_t compared = MIN(sizeof(chunk), length);
+
+	for (off_t at = from; at < (off_t)flash_area->fa_size;
+	     at += UBI_TEST_PEB_SIZE) {
+		zassert_ok(flash_area_read(flash_area, at, chunk, compared));
+
+		if (0 == memcmp(chunk, needle, compared))
+			return at;
+	}
+
+	return -1;
+}
+
+static int write_byte_fails(const struct device *dev, off_t offset,
+			    uint8_t data)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(offset);
+
+	if (0 == writes_left)
+		return -EIO;
+
+	writes_left -= 1;
+
+	return data;
+}
+
+static const struct flash_simulator_cb failing_writes = {
+	.write_byte = write_byte_fails,
+};
 
 /* Module interface function definitions ----------------------------------- */
 
@@ -124,23 +185,6 @@ uint32_t corrupt_volume_tables(struct ubi_device *ubi,
 	return damaged;
 }
 
-static off_t data_find(const struct flash_area *flash_area,
-		       const uint8_t *needle, size_t length, off_t from)
-{
-	uint8_t chunk[SWEEP_CHUNK];
-	const size_t compared = MIN(sizeof(chunk), length);
-
-	for (off_t at = from; at < (off_t)flash_area->fa_size;
-	     at += UBI_TEST_PEB_SIZE) {
-		zassert_ok(flash_area_read(flash_area, at, chunk, compared));
-
-		if (0 == memcmp(chunk, needle, compared))
-			return at;
-	}
-
-	return -1;
-}
-
 uint32_t count_data_matching(const uint8_t *needle, size_t length)
 {
 	const struct flash_area *flash_area = NULL;
@@ -176,4 +220,63 @@ uint32_t corrupt_data_matching(const uint8_t *needle, size_t length)
 	flash_area_close(flash_area);
 
 	return damaged;
+}
+
+uint32_t corrupt_header_of_data_matching(const uint8_t *needle, size_t length)
+{
+	const struct flash_area *flash_area = NULL;
+	uint8_t header[UBI_TEST_DATA_OFFSET - UBI_TEST_VID_OFFSET];
+	uint32_t damaged = 0;
+	off_t at = UBI_TEST_DATA_OFFSET;
+
+	zassert_ok(flash_area_open(TEST_PARTITION, &flash_area));
+
+	while (0 <= (at = data_find(flash_area, needle, length, at))) {
+		const off_t vid =
+			at - UBI_TEST_DATA_OFFSET + UBI_TEST_VID_OFFSET;
+
+		zassert_ok(flash_area_read(flash_area, vid, header,
+					   sizeof(header)));
+
+		/* Any byte with a bit left to clear will do: the checksum in
+		 * front of the tag covers the whole header. */
+		for (size_t i = 0; i < sizeof(header); ++i) {
+			if (0x00 == header[i])
+				continue;
+
+			flash_clear_a_bit(flash_area, vid + (off_t)i);
+			damaged += 1;
+			break;
+		}
+
+		at += UBI_TEST_PEB_SIZE;
+	}
+
+	flash_area_close(flash_area);
+
+	return damaged;
+}
+
+void flash_fail_writes_after(uint32_t after)
+{
+	const struct flash_area *flash_area = NULL;
+
+	zassert_ok(flash_area_open(TEST_PARTITION, &flash_area));
+
+	writes_left = after;
+	flash_simulator_set_callbacks(flash_area_get_device(flash_area),
+				      &failing_writes);
+
+	flash_area_close(flash_area);
+}
+
+void flash_fail_writes_never(void)
+{
+	const struct flash_area *flash_area = NULL;
+
+	zassert_ok(flash_area_open(TEST_PARTITION, &flash_area));
+
+	flash_simulator_set_callbacks(flash_area_get_device(flash_area), NULL);
+
+	flash_area_close(flash_area);
 }

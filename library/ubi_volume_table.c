@@ -385,9 +385,10 @@ int ubi_volume_table_commit(struct ubi_device *ubi,
 		spare, ubi->volume_table.current
 	};
 
+	ubi->volume_table.degraded = false;
+
 	for (uint32_t i = 0; i < UBI_VOLUME_TABLE_LEB_COUNT; ++i) {
 		const uint32_t lnum = order[i];
-		bool history_lost = false;
 		int ret = 0;
 
 		if (UBI_LEB_UNMAPPED == ubi->volume_table.eba[lnum]) {
@@ -407,7 +408,7 @@ int ubi_volume_table_commit(struct ubi_device *ubi,
 
 		const uint32_t pnum = ubi->volume_table.eba[lnum];
 
-		ret = ubi_peb_prepare(ubi, pnum, &history_lost);
+		ret = ubi_peb_prepare(ubi, pnum);
 
 		if (0 != ret) {
 			LOG_ERR("PEB %u cannot take volume table copy %u (%d)",

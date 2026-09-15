@@ -53,6 +53,21 @@ struct ubi_volume *ubi_volume_by_id(struct ubi_device *ubi, uint32_t vol_id);
 uint32_t ubi_volumes_leb_free(const struct ubi_device *ubi);
 
 /**
+ * \brief Write the volumes as they stand to every copy of the volume table.
+ *
+ *        What an update does anyway, without anything to update: the way to
+ *        bring a pair that does not agree back into agreement.
+ *
+ * \param[in,out] ubi                   Attached device.
+ *
+ * \retval 0
+ *         Both copies now carry the same record.
+ * \retval -EIO
+ *         The crypto backend or the flash driver failed.
+ */
+int ubi_volumes_rewrite(struct ubi_device *ubi);
+
+/**
  * \brief Give every volume a record declares its slice of the mapping table.
  *
  *        Leaves every logical block unmapped; the second scan pass hangs the

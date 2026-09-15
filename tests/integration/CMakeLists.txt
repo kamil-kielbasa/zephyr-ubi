@@ -12,6 +12,7 @@ target_sources(app PRIVATE
   src/test_attach.c
   src/test_integrity.c
   src/test_leb.c
+  src/test_maintenance.c
   src/test_trust.c
   src/test_volume.c
 )

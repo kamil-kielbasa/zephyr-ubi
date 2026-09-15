@@ -361,11 +361,11 @@ enum ubi_maintenance_op {
 	/** Move rarely rewritten data off the least worn blocks to even out
 	 *  erase counts. */
 	UBI_MAINTENANCE_RELOCATE,
-	/** Rewrite blocks whose reads look marginal, refreshing the charge. */
-	UBI_MAINTENANCE_SCRUB,
-	/** Bring the two copies of the volume table back into agreement,
-	 *  which is what #UBI_EVENT_VOLUME_TABLE_DEGRADED asks for. Until
-	 *  they agree, one erase can take the layout back a revision. */
+	/** Undo what damage took away: bring the two copies of the volume
+	 *  table back into agreement, which is what
+	 *  #UBI_EVENT_VOLUME_TABLE_DEGRADED asks for, and give blocks retired
+	 *  after a failed write another chance. Until the copies agree, one
+	 *  erase can take the layout back a revision. */
 	UBI_MAINTENANCE_REPAIR,
 };
 
@@ -909,12 +909,19 @@ int ubi_leb_get_info(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
  * \param operation                     Work to perform.
  * \param budget                        Maximum operations to perform. Zero
  *                                      only reports what is pending.
- * \param[out] result                   Work done and remaining, or \c NULL.
+ * \param[out] result                   Work done and remaining. Filled even
+ *                                      when the call returns an error, so
+ *                                      that a run cut short still says how
+ *                                      far it got.
  *
  * \retval 0
  *         Success, including when there was nothing to do.
  * \retval -EINVAL
- *         \p ubi is not attached, or \p operation is unknown.
+ *         \p ubi is not attached, \p operation is unknown, or \p result is
+ *         \c NULL.
+ * \retval -EBADMSG
+ *         Relocation found a block whose header or data no longer verifies;
+ *         it was retired rather than copied.
  * \retval -ENOSPC
  *         Relocation found no spare block to move data into.
  * \retval -EIO

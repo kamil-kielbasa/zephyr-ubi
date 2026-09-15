@@ -134,10 +134,10 @@ static int leb_claim(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 	return 0;
 
 give_back:
-	/* Half a block is worth nothing, and the mapping has not moved, so
-	 * hand it back for an erase rather than leaving it in the free pool
-	 * for the next write to land on top of. */
-	ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+	/* The mapping has not moved, so the logical block is intact. The
+	 * physical one is retired rather than queued: handing it back would
+	 * let the next allocation pick it and fail the same way. */
+	ubi_peb_retire(ubi, pnum, vol_id, lnum);
 
 	return ret;
 }
@@ -217,24 +217,15 @@ int ubi_impl_leb_erase(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum)
 	if (0 != ret)
 		return ret;
 
-	bool history_lost = false;
-
-	ret = ubi_peb_prepare(ubi, pnum, &history_lost);
+	ret = ubi_peb_prepare(ubi, pnum);
 
 	if (0 != ret) {
-		/* The mapping is gone whatever happens next, so the block goes
-		 * into the queue and a reclaim can try the erase again. */
-		ubi_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
+		ubi_peb_retire(ubi, pnum, vol_id, lnum);
 		LOG_ERR("PEB %u: held volume %u block %u and could not be "
 			"erased (%d)",
 			pnum, vol_id, lnum, ret);
 		return ret;
 	}
-
-	if (history_lost)
-		LOG_WRN("PEB %u: its erase count was unreadable and had to be "
-			"guessed",
-			pnum);
 
 	return 0;
 }

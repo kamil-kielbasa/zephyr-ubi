@@ -36,6 +36,7 @@
 
 #include "ubi_device.h"
 #include "ubi_leb.h"
+#include "ubi_maintenance.h"
 #include "ubi_private.h"
 #include "ubi_state.h"
 #include "ubi_volume.h"
@@ -469,6 +470,33 @@ int ubi_leb_get_info(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 
 	const int ret = ubi_impl_leb_get_info(ubi, vol_id, lnum, info);
 
+	k_mutex_unlock(&ubi->lock);
+
+	return ret;
+}
+
+int ubi_maintenance(struct ubi_device *ubi, enum ubi_maintenance_op operation,
+		    uint32_t budget, struct ubi_maintenance_result *result)
+{
+	if (!device_is_attached(ubi) || NULL == result) {
+		LOG_ERR("maintenance needs an attached handle and somewhere to "
+			"report what it did");
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&ubi->lock, K_FOREVER);
+
+	int ret = ubi_state_guard(ubi);
+
+	if (0 != ret) {
+		LOG_ERR("no maintenance runs on a device that is no longer "
+			"trusted");
+		goto unlock;
+	}
+
+	ret = ubi_impl_maintenance(ubi, operation, budget, result);
+
+unlock:
 	k_mutex_unlock(&ubi->lock);
 
 	return ret;

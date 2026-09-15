@@ -56,6 +56,7 @@ int ubi_state_describe(const struct ubi_device *ubi,
 			measured.reclaimable_pebs += 1;
 			break;
 		case UBI_PEB_BAD:
+		case UBI_PEB_WORN_OUT:
 			measured.bad_pebs += 1;
 			break;
 		case UBI_PEB_MAPPED:
@@ -66,7 +67,8 @@ int ubi_state_describe(const struct ubi_device *ubi,
 
 		/* Every other state means the erase counter header verified
 		 * and named this image, so its count can be added up. */
-		if (UBI_PEB_UNKNOWN == state || UBI_PEB_BAD == state)
+		if (UBI_PEB_UNKNOWN == state || UBI_PEB_BAD == state ||
+		    UBI_PEB_WORN_OUT == state)
 			continue;
 
 		measured.healthy_pebs += 1;

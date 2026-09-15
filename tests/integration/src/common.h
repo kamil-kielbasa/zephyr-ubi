@@ -32,6 +32,9 @@
 /** Where a block's data begins, behind its two 64-byte headers. */
 #define UBI_TEST_DATA_OFFSET (128)
 
+/** Where the volume identifier header begins, behind the erase counter one. */
+#define UBI_TEST_VID_OFFSET (64)
+
 /** Geometry of the flash this build runs on, straight from the overlay. */
 #define UBI_TEST_PEB_SIZE DT_PROP(DT_NODELABEL(flash0), erase_block_size)
 #define UBI_TEST_WRITE_BLOCK DT_PROP(DT_NODELABEL(flash0), write_block_size)
@@ -95,5 +98,31 @@ uint32_t corrupt_data_matching(const uint8_t *needle, size_t length);
  * \return How many blocks carry them.
  */
 uint32_t count_data_matching(const uint8_t *needle, size_t length);
+
+/**
+ * \brief Flip a bit in the volume identifier header of every block whose
+ *        data area starts with \p needle.
+ *
+ * \param[in] needle                    Bytes to look for.
+ * \param length                        How many.
+ *
+ * \return How many headers were damaged.
+ */
+uint32_t corrupt_header_of_data_matching(const uint8_t *needle, size_t length);
+
+/**
+ * \brief Make every flash write past this one fail.
+ *
+ *        Stands in for a block that has worn out: the only fault the flash
+ *        simulator cannot produce on its own.
+ *
+ * \param after                         Bytes to let through first.
+ */
+void flash_fail_writes_after(uint32_t after);
+
+/**
+ * \brief Let writes through again.
+ */
+void flash_fail_writes_never(void);
 
 #endif /* COMMON_H */

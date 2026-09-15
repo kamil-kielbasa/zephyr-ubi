@@ -77,10 +77,14 @@ enum ubi_peb_state {
 	UBI_PEB_MAPPED,
 	/** Released by its logical block, awaiting #UBI_MAINTENANCE_RECLAIM. */
 	UBI_PEB_RECLAIM,
-	/** Retired after tampering or a persistent I/O error. Held in RAM
-	 *  only, never written to the flash, so a wrong key does not condemn
-	 *  a block permanently. */
+	/** Refused a write or an erase. Out of service, but
+	 *  #UBI_MAINTENANCE_REPAIR will give it one more chance. */
 	UBI_PEB_BAD,
+	/** It refused again. No more chances until the next attach, so that a
+	 *  block which is genuinely finished stops costing an erase every
+	 *  time the application asks for repairs. Held in RAM only, like
+	 *  #UBI_PEB_BAD, so a wrong key never condemns a block permanently. */
+	UBI_PEB_WORN_OUT,
 };
 
 BUILD_ASSERT(UBI_PEB_BAD <= UINT8_MAX,
@@ -189,6 +193,11 @@ struct ubi_volume_table {
 	/** Which copy is in force. The other one is the copy an update
 	 *  overwrites first, so that a complete copy always survives. */
 	uint32_t current;
+	/** The copies do not say the same thing, or one of them is missing,
+	 *  so a single erase would cost a revision. Cleared by
+	 *  #UBI_MAINTENANCE_REPAIR and by any update, since both write every
+	 *  copy. */
+	bool degraded;
 };
 
 /**

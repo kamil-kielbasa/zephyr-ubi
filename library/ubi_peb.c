@@ -16,6 +16,7 @@
 #include <zephyr/logging/log.h>
 
 /* UBI headers: */
+#include "ubi_event.h"
 #include "ubi_header.h"
 #include "ubi_io.h"
 #include "ubi_peb.h"
@@ -32,6 +33,12 @@ LOG_MODULE_DECLARE(ubi, CONFIG_UBI_LOG_LEVEL);
  */
 static int peb_least_worn(const struct ubi_device *ubi,
 			  enum ubi_peb_state state, uint32_t *pnum);
+
+/**
+ * \brief Find the most worn block in a given state.
+ */
+static int peb_most_worn(const struct ubi_device *ubi, enum ubi_peb_state state,
+			 uint32_t *pnum);
 
 /**
  * \brief Average erase count of the blocks that still have a readable one.
@@ -62,6 +69,28 @@ static int peb_least_worn(const struct ubi_device *ubi,
 	return found ? 0 : -ENOENT;
 }
 
+static int peb_most_worn(const struct ubi_device *ubi, enum ubi_peb_state state,
+			 uint32_t *pnum)
+{
+	uint32_t highest = 0;
+	bool found = false;
+
+	for (uint32_t candidate = 0; candidate < ubi->geometry.peb_count;
+	     ++candidate) {
+		if (state != ubi_peb_state_get(ubi, candidate))
+			continue;
+
+		if (found && ubi->blocks.erase_count[candidate] <= highest)
+			continue;
+
+		highest = ubi->blocks.erase_count[candidate];
+		*pnum = candidate;
+		found = true;
+	}
+
+	return found ? 0 : -ENOENT;
+}
+
 static uint32_t peb_mean_erase_count(const struct ubi_device *ubi)
 {
 	uint64_t total = 0;
@@ -74,7 +103,8 @@ static uint32_t peb_mean_erase_count(const struct ubi_device *ubi)
 	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
 		const enum ubi_peb_state state = ubi_peb_state_get(ubi, pnum);
 
-		if (UBI_PEB_UNKNOWN == state || UBI_PEB_BAD == state)
+		if (UBI_PEB_UNKNOWN == state || UBI_PEB_BAD == state ||
+		    UBI_PEB_WORN_OUT == state)
 			continue;
 
 		total += ubi->blocks.erase_count[pnum];
@@ -101,7 +131,7 @@ void ubi_peb_state_set(struct ubi_device *ubi, uint32_t pnum,
 	ubi->blocks.state[pnum] = (uint8_t)state;
 }
 
-int ubi_peb_prepare(struct ubi_device *ubi, uint32_t pnum, bool *history_lost)
+int ubi_peb_prepare(struct ubi_device *ubi, uint32_t pnum)
 {
 	struct ubi_headers headers = { 0 };
 	int ret = ubi_headers_read(ubi, pnum, &headers);
@@ -113,12 +143,14 @@ int ubi_peb_prepare(struct ubi_device *ubi, uint32_t pnum, bool *history_lost)
 	const bool blank = (UBI_HEADER_ERASED == headers.ec_status);
 	uint64_t erase_count = 0;
 
-	if (readable)
+	if (readable) {
 		erase_count = headers.ec.erase_count;
-	else if (!blank)
+	} else if (!blank) {
 		erase_count = peb_mean_erase_count(ubi);
-
-	*history_lost = !readable && !blank;
+		LOG_WRN("PEB %u: its erase count was unreadable, so it starts "
+			"again from the device average",
+			pnum);
+	}
 
 	ret = ubi_io_erase(ubi, pnum);
 
@@ -166,23 +198,42 @@ int ubi_peb_allocate(struct ubi_device *ubi, uint32_t *pnum)
 		return -ENOSPC;
 	}
 
-	bool history_lost = false;
-
-	ret = ubi_peb_prepare(ubi, candidate, &history_lost);
+	ret = ubi_peb_prepare(ubi, candidate);
 
 	if (0 != ret) {
-		LOG_ERR("PEB %u cannot be made ready for use (%d)", candidate,
-			ret);
-		ubi_peb_state_set(ubi, candidate, UBI_PEB_BAD);
+		ubi_peb_retire(ubi, candidate, UBI_VOL_ID_INVALID, 0);
 		return ret;
 	}
-
-	if (history_lost)
-		LOG_WRN("PEB %u: its erase count was unreadable, so it starts "
-			"again from the device average",
-			candidate);
 
 	*pnum = candidate;
 
 	return 0;
+}
+
+int ubi_peb_allocate_worn(struct ubi_device *ubi, uint32_t *pnum)
+{
+	const int ret = peb_most_worn(ubi, UBI_PEB_FREE, pnum);
+
+	if (0 != ret) {
+		LOG_ERR("no block is erased and waiting to be written");
+		return -ENOSPC;
+	}
+
+	return 0;
+}
+
+void ubi_peb_retire(struct ubi_device *ubi, uint32_t pnum, uint32_t vol_id,
+		    uint32_t lnum)
+{
+	LOG_WRN("PEB %u: retired after a failed write or erase", pnum);
+
+	ubi_peb_state_set(ubi, pnum, UBI_PEB_BAD);
+	ubi_event_emit(ubi, UBI_EVENT_PEB_BAD, pnum, vol_id, lnum);
+}
+
+void ubi_peb_write_off(struct ubi_device *ubi, uint32_t pnum)
+{
+	LOG_WRN("PEB %u: failed again and is out of service for good", pnum);
+
+	ubi_peb_state_set(ubi, pnum, UBI_PEB_WORN_OUT);
 }
