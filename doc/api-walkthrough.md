@@ -56,10 +56,10 @@ UBI never formats a partition on its own initiative. If it finds no volume table
 
 ```c
 static const struct ubi_config cfg = {
-	.flash_area_id = FIXED_PARTITION_ID(storage_partition),
+	.flash_area_id = PARTITION_ID(storage_partition),
 	.ikm_key_id    = DEVICE_IKM_KEY_ID,
 	.event_cb      = on_ubi_event,
-	.freshness_cb  = on_ubi_freshness,
+	.state_cb      = on_ubi_state,
 };
 
 int storage_init(void)
@@ -83,7 +83,7 @@ What the other codes mean:
 |---|---|---|
 | `-EBADMSG` | a volume table is there but fails authentication | wrong key, or someone touched the metadata — **do not reflexively format** |
 | `-EACCES` | the key is missing or does not permit derivation | a provisioning problem, not a flash problem |
-| `-EROFS` | your freshness callback returned `REJECT` | rollback detected |
+| `-EROFS` | your trust callback returned `UBI_STATE_UNTRUSTED` | rollback detected |
 | `-EINVAL` | partition geometry disagrees with the recorded one | the partition was resized |
 | `-EIO` | the flash driver failed | hardware problem |
 
@@ -282,24 +282,40 @@ void storage_idle_work(void)
 ## 10. Rollback detection
 
 ```c
-static enum ubi_freshness_verdict on_ubi_freshness(const struct ubi_freshness *f,
-						   void *user_context)
+static enum ubi_state_verdict on_ubi_state(const struct ubi_device_info *info,
+					   void *user_context)
 {
-	struct ubi_freshness anchor;
+	struct rollback_anchor anchor;
 
 	if (trusted_store_load(&anchor) != 0) {
-		trusted_store_save(f);              /* first boot */
-		return UBI_FRESHNESS_ACCEPT;
+		trusted_store_save(info);	    /* first boot */
+		return UBI_STATE_TRUSTED;
 	}
 
-	if (f->revision < anchor.revision || f->global_sqnum < anchor.global_sqnum) {
-		return UBI_FRESHNESS_REJECT;
+	if (info->revision < anchor.revision ||
+	    info->global_sqnum < anchor.global_sqnum) {
+		return UBI_STATE_UNTRUSTED;
 	}
 
-	trusted_store_save(f);
-	return UBI_FRESHNESS_ACCEPT;
+	trusted_store_save(info);
+	return UBI_STATE_TRUSTED;
 }
 ```
+
+UBI asks once at the end of every attach, and again every
+`CONFIG_UBI_STATE_CHECK_INTERVAL` metadata writes, so a long uptime is not a way
+around the check. It asks *before* the write it is about to make, which is what
+lets a refusal be honoured with nothing on the flash.
+
+Save the new values before returning `UBI_STATE_TRUSTED`: UBI carries on the
+moment you return.
+
+`UBI_STATE_UNTRUSTED` is final. The attach that provoked it fails with `-EROFS`,
+and on an attached device every operation that would write returns `-EROFS` from
+then on. Only detaching and attaching again clears it, so carrying on is a
+deliberate act rather than the result of a retry. Reads and
+`ubi_device_get_info()` keep working, so you can still report what happened and
+salvage what you need.
 
 The anchor has to live outside the flash UBI manages — PSA ITS, an RPMC counter, a secure
 element. Without that there is nothing to compare against.

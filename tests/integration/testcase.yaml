@@ -23,3 +23,19 @@ tests:
       - ubi
     extra_args:
       - EXTRA_DTC_OVERLAY_FILE=stm32u5.overlay
+  # The two switches that change what the library does rather than what the
+  # flash underneath it looks like.
+  ubi.integration.verify_on_read:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_VERIFY_ON_READ=y
+  ubi.integration.self_checks:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_SELF_CHECKS=y

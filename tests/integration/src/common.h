@@ -27,7 +27,7 @@
 /* Defines ----------------------------------------------------------------- */
 
 /** The partition every test formats, fills and inspects. */
-#define TEST_PARTITION FIXED_PARTITION_ID(storage_partition)
+#define TEST_PARTITION PARTITION_ID(storage_partition)
 
 /** Where a block's data begins, behind its two 64-byte headers. */
 #define UBI_TEST_DATA_OFFSET (128)

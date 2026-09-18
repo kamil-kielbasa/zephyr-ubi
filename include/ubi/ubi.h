@@ -302,7 +302,7 @@ typedef enum ubi_state_verdict (*ubi_state_cb_t)(
  *        unreadable.
  */
 struct ubi_config {
-	/** Fixed partition to manage, from \c FIXED_PARTITION_ID(). */
+	/** Fixed partition to manage, from \c PARTITION_ID(). */
 	uint8_t flash_area_id;
 
 	/**
