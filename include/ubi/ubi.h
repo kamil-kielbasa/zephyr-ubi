@@ -69,7 +69,12 @@ enum ubi_event_type {
 	 *  checksum recomputed. */
 	UBI_EVENT_HDR_TAMPERED,
 	/** The volume table record failed its CMAC. */
-	UBI_EVENT_VOLUME_TABLE_TAMPERED,
+	/** A copy of the volume table could not be used. The record carries a
+	 *  checksum inside a header sealed with the same key, so a changed
+	 *  byte and a forged record are indistinguishable from out here:
+	 *  whoever could repair the checksum would already hold the key. All
+	 *  that is known is that one copy is gone. */
+	UBI_EVENT_VOLUME_TABLE_CORRUPT,
 	/** Only one usable copy of the volume table is left, or the two do
 	 *  not agree. The device works, but a single erase would now take
 	 *  the layout back a revision instead of being survivable. Clear it

@@ -45,7 +45,68 @@ static int peb_most_worn(const struct ubi_device *ubi, enum ubi_peb_state state,
  */
 static uint32_t peb_mean_erase_count(const struct ubi_device *ubi);
 
+/**
+ * \brief Bring every protection countdown one erase closer to expiring.
+ *
+ * \param erased                        Block that was just erased, which
+ *                                      now holds nothing worth protecting.
+ */
+static void peb_protection_tick(struct ubi_device *ubi, uint32_t erased);
+
+/**
+ * \brief Say the other way round that no block in \p state beats \p chosen.
+ *
+ *        A search that has drifted still agrees with itself, so this states
+ *        the property instead of looking for it again.
+ *
+ * \retval 0
+ *         The choice holds.
+ * \retval -EFAULT
+ *         It does not, and the library has contradicted itself.
+ */
+static int peb_check_extreme(const struct ubi_device *ubi,
+			     enum ubi_peb_state state, uint32_t chosen,
+			     bool lowest);
+
 /* Static function definitions --------------------------------------------- */
+
+static void peb_protection_tick(struct ubi_device *ubi, uint32_t erased)
+{
+	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
+		if (0 != ubi->blocks.protect[pnum])
+			ubi->blocks.protect[pnum] -= 1;
+	}
+
+	ubi->blocks.protect[erased] = 0;
+}
+
+static int peb_check_extreme(const struct ubi_device *ubi,
+			     enum ubi_peb_state state, uint32_t chosen,
+			     bool lowest)
+{
+	const uint32_t taken = ubi->blocks.erase_count[chosen];
+
+	if (state != ubi_peb_state_get(ubi, chosen)) {
+		LOG_ERR("PEB %u was chosen out of the wrong state", chosen);
+		return -EFAULT;
+	}
+
+	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
+		const uint32_t count = ubi->blocks.erase_count[pnum];
+
+		if (state != ubi_peb_state_get(ubi, pnum))
+			continue;
+
+		if (lowest ? count < taken : count > taken) {
+			LOG_ERR("PEB %u erased %u times was chosen over PEB %u "
+				"standing at %u",
+				chosen, taken, pnum, count);
+			return -EFAULT;
+		}
+	}
+
+	return 0;
+}
 
 static int peb_least_worn(const struct ubi_device *ubi,
 			  enum ubi_peb_state state, uint32_t *pnum)
@@ -66,7 +127,13 @@ static int peb_least_worn(const struct ubi_device *ubi,
 		found = true;
 	}
 
-	return found ? 0 : -ENOENT;
+	if (!found)
+		return -ENOENT;
+
+	if (IS_ENABLED(CONFIG_UBI_SELF_CHECKS))
+		return peb_check_extreme(ubi, state, *pnum, true);
+
+	return 0;
 }
 
 static int peb_most_worn(const struct ubi_device *ubi, enum ubi_peb_state state,
@@ -88,7 +155,13 @@ static int peb_most_worn(const struct ubi_device *ubi, enum ubi_peb_state state,
 		found = true;
 	}
 
-	return found ? 0 : -ENOENT;
+	if (!found)
+		return -ENOENT;
+
+	if (IS_ENABLED(CONFIG_UBI_SELF_CHECKS))
+		return peb_check_extreme(ubi, state, *pnum, false);
+
+	return 0;
 }
 
 static uint32_t peb_mean_erase_count(const struct ubi_device *ubi)
@@ -176,6 +249,7 @@ int ubi_peb_prepare(struct ubi_device *ubi, uint32_t pnum)
 
 	ubi->blocks.erase_count[pnum] = (uint32_t)header.erase_count;
 	ubi_peb_state_set(ubi, pnum, UBI_PEB_FREE);
+	peb_protection_tick(ubi, pnum);
 
 	return 0;
 }
@@ -185,26 +259,30 @@ int ubi_peb_allocate(struct ubi_device *ubi, uint32_t *pnum)
 	uint32_t candidate = 0;
 	int ret = peb_least_worn(ubi, UBI_PEB_FREE, &candidate);
 
-	if (0 == ret) {
-		*pnum = candidate;
-		return 0;
-	}
-
-	ret = peb_least_worn(ubi, UBI_PEB_UNKNOWN, &candidate);
-
 	if (0 != ret) {
-		LOG_ERR("no block is free and none can be made free without "
-			"reclaiming");
-		return -ENOSPC;
+		ret = peb_least_worn(ubi, UBI_PEB_UNKNOWN, &candidate);
+
+		if (0 != ret) {
+			LOG_ERR("no block is free and none can be made free "
+				"without reclaiming");
+			return -ENOSPC;
+		}
+
+		ret = ubi_peb_prepare(ubi, candidate);
+
+		if (0 != ret) {
+			ubi_peb_retire(ubi, candidate, UBI_VOL_ID_INVALID, 0);
+			return ret;
+		}
 	}
 
-	ret = ubi_peb_prepare(ubi, candidate);
-
-	if (0 != ret) {
-		ubi_peb_retire(ubi, candidate, UBI_VOL_ID_INVALID, 0);
-		return ret;
-	}
-
+	/*
+	 * This block was handed over because it was the least worn one free,
+	 * which makes it the least worn one in use the moment anything lands
+	 * on it, and so the first thing levelling would reach for. Moving it
+	 * now would carry data the caller has not finished writing.
+	 */
+	ubi->blocks.protect[candidate] = (uint8_t)CONFIG_UBI_PROTECTION_CYCLES;
 	*pnum = candidate;
 
 	return 0;

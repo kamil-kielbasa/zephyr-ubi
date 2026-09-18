@@ -255,11 +255,15 @@ void storage_idle_work(void)
 		break;
 
 	case UBI_EVENT_HDR_TAMPERED:
-        case UBI_EVENT_VOLUME_TABLE_TAMPERED:
-                /* CRC matches, CMAC does not - someone recomputed the checksum. */
-                LOG_ERR("Tampering, PEB %u", e->pnum);
-                security_incident();
-                break;
+		/* CRC matches, CMAC does not - someone recomputed the checksum. */
+		LOG_ERR("Tampering, PEB %u", e->pnum);
+		security_incident();
+		break;
+
+	case UBI_EVENT_VOLUME_TABLE_CORRUPT:
+		/* One copy of the layout is gone. Whether it rotted or was
+		 * forged cannot be told apart: its checksum is sealed. */
+		LOG_ERR("Volume table copy lost, PEB %u", e->pnum);
 
         case UBI_EVENT_VOLUME_TABLE_DEGRADED:
                 /* One copy left: one erase would now cost a revision. */

@@ -19,6 +19,7 @@
 
 /* Zephyr headers: */
 #include <zephyr/drivers/flash/flash_simulator.h>
+#include <zephyr/stats/stats.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/sys/util.h>
@@ -34,6 +35,16 @@
 
 /** Chunk used when sweeping the whole partition. */
 #define SWEEP_CHUNK (256)
+
+/* Module type definitions ------------------------------------------------- */
+
+/** One counter being looked for while walking the statistics group. */
+struct counter_wanted {
+	/** Name to match. */
+	const char *name;
+	/** What it held, left at zero when no name matched. */
+	uint32_t value;
+};
 
 /* Module variables and constants ------------------------------------------ */
 
@@ -57,7 +68,24 @@ static off_t data_find(const struct flash_area *flash_area,
 static int write_byte_fails(const struct device *dev, off_t offset,
 			    uint8_t data);
 
+/**
+ * \brief Pick the wanted counter out of a statistics group being walked.
+ */
+static int counter_match(struct stats_hdr *group, void *arg, const char *name,
+			 uint16_t offset);
+
 /* Static function definitions --------------------------------------------- */
+
+static int counter_match(struct stats_hdr *group, void *arg, const char *name,
+			 uint16_t offset)
+{
+	struct counter_wanted *wanted = arg;
+
+	if (0 == strcmp(wanted->name, name))
+		wanted->value = *(uint32_t *)((uint8_t *)group + offset);
+
+	return 0;
+}
 
 static off_t data_find(const struct flash_area *flash_area,
 		       const uint8_t *needle, size_t length, off_t from)
@@ -279,4 +307,23 @@ void flash_fail_writes_never(void)
 	flash_simulator_set_callbacks(flash_area_get_device(flash_area), NULL);
 
 	flash_area_close(flash_area);
+}
+
+uint32_t flash_ops(const char *name)
+{
+	struct stats_hdr *group = stats_group_find("flash_sim_stats");
+	struct counter_wanted wanted = { .name = name, .value = 0 };
+
+	zassert_not_null(group, "the flash simulator keeps no counters");
+	zassert_ok(stats_walk(group, counter_match, &wanted));
+
+	return wanted.value;
+}
+
+void flash_ops_forget(void)
+{
+	struct stats_hdr *group = stats_group_find("flash_sim_stats");
+
+	zassert_not_null(group, "the flash simulator keeps no counters");
+	stats_reset(group);
 }

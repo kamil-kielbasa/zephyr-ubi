@@ -40,6 +40,45 @@ config UBI_VERIFY_ON_READ
           against tampering while the device is running, and it costs an
           extra flash read plus a CMAC on the hottest path.
 
+config UBI_PROTECTION_CYCLES
+        int "Erases a freshly handed out block is left alone for"
+        default 64
+        range 0 255
+        help
+          A block is given out because it was the least worn one free, which
+          makes it the least worn one in use the moment something is written
+          to it, and so the first thing wear levelling would want to move.
+          Moving it would be wasted work: the caller has only just filled it
+          and may be about to rewrite it anyway.
+
+          This counts erases anywhere on the device, not time. Zero turns
+          the protection off. The count lives in RAM, so an attach starts
+          every block unprotected.
+
+          Too small is the dangerous direction. The window has to outlast
+          how often the hottest data is rewritten, or levelling carries a
+          block off just before the caller replaces it anyway. Measured on
+          a pool of worn blocks flooded with barely used ones, a window of
+          8 left every one of 4096 rewrites being carried off and doubled
+          the erase count; 16 and above stopped it dead. Linux uses 10, but
+          its levelling threshold is 4096 against our 256, so it reaches
+          for a block far less often.
+
+config UBI_SELF_CHECKS
+        bool "Check the library's own choices at runtime"
+        default n
+        help
+          Some of what UBI decides cannot be seen from outside: which block
+          it allocated and which one it moved data off are both answers to
+          "the least worn one", and the only evidence a caller gets is an
+          erase counter that went up. This turns those decisions into
+          statements the library checks against itself.
+
+          Each check is a second pass over the block table, so it doubles
+          the cost of a choice that is already the expensive part of an
+          allocation. Meant for tests and for bringing up a new part, not
+          for shipping.
+
 config UBI_STATE_CHECK_INTERVAL
         int "Flash writes between state checks"
         default 64

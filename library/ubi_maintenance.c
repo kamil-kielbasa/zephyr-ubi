@@ -99,6 +99,18 @@ static uint32_t relocate_pending(const struct ubi_device *ubi);
 static int relocate_choose(const struct ubi_device *ubi, uint32_t *pnum);
 
 /**
+ * \brief Say the other way round that no candidate has more life left than
+ *        the one relocation took.
+ *
+ * \retval 0
+ *         The choice holds.
+ * \retval -EFAULT
+ *         It does not, and the library has contradicted itself.
+ */
+static int relocate_check_choice(const struct ubi_device *ubi, uint32_t chosen,
+				 uint32_t worst);
+
+/**
  * \brief Bytes of a block's data area worth carrying to the new block.
  *
  *        Trailing erased bytes are dropped and the result is rounded up to a
@@ -254,8 +266,38 @@ static bool relocate_worthwhile(const struct ubi_device *ubi, uint32_t pnum,
 	if (UBI_PEB_MAPPED != ubi_peb_state_get(ubi, pnum))
 		return false;
 
+	if (0 != ubi->blocks.protect[pnum])
+		return false;
+
 	return worst - ubi->blocks.erase_count[pnum] >
 	       CONFIG_UBI_WEAR_LEVELING_THRESHOLD;
+}
+
+static int relocate_check_choice(const struct ubi_device *ubi, uint32_t chosen,
+				 uint32_t worst)
+{
+	const uint32_t taken = ubi->blocks.erase_count[chosen];
+
+	if (!relocate_worthwhile(ubi, chosen, worst)) {
+		LOG_ERR("PEB %u was not worth moving off", chosen);
+		return -EFAULT;
+	}
+
+	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
+		const uint32_t count = ubi->blocks.erase_count[pnum];
+
+		if (!relocate_worthwhile(ubi, pnum, worst))
+			continue;
+
+		if (count < taken) {
+			LOG_ERR("PEB %u erased %u times was moved while PEB %u "
+				"stands at %u with more life to give",
+				chosen, taken, pnum, count);
+			return -EFAULT;
+		}
+	}
+
+	return 0;
 }
 
 static uint32_t relocate_pending(const struct ubi_device *ubi)
@@ -290,7 +332,13 @@ static int relocate_choose(const struct ubi_device *ubi, uint32_t *pnum)
 		found = true;
 	}
 
-	return found ? 0 : -ENOENT;
+	if (!found)
+		return -ENOENT;
+
+	if (IS_ENABLED(CONFIG_UBI_SELF_CHECKS))
+		return relocate_check_choice(ubi, *pnum, worst);
+
+	return 0;
 }
 
 static int relocate_data_length(const struct ubi_device *ubi, uint32_t pnum,

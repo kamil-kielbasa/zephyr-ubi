@@ -222,7 +222,7 @@ ZTEST(ubi_integration, test_repairing_clears_a_degraded_volume_table)
 
 	zassert_ok(ubi_device_deinit(ubi));
 
-	memset(event_seen, 0, sizeof(event_seen));
+	events_forget();
 	zassert_ok(ubi_device_init(ubi, &config));
 
 	zassert_false(event_seen[UBI_EVENT_VOLUME_TABLE_DEGRADED],
@@ -399,7 +399,7 @@ ZTEST(ubi_integration, test_a_block_that_refuses_a_write_is_retired)
 	zassert_ok(ubi_leb_change(ubi, vol_id, 0, kept, sizeof(kept)));
 	zassert_ok(ubi_device_get_info(ubi, &before));
 
-	memset(event_seen, 0, sizeof(event_seen));
+	events_forget();
 	flash_fail_writes_after(0);
 
 	zassert_equal(-EIO,
@@ -664,7 +664,7 @@ ZTEST(ubi_integration, test_relocation_refuses_a_block_it_cannot_vouch_for)
 	 * would put a fresh, correct checksum on corrupted bytes. */
 	zassert_true(0 < corrupt_data_matching(cold, sizeof(cold)));
 
-	memset(event_seen, 0, sizeof(event_seen));
+	events_forget();
 
 	zassert_equal(-EBADMSG, ubi_maintenance(ubi, UBI_MAINTENANCE_RELOCATE,
 						1, &result));

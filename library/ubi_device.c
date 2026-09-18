@@ -289,10 +289,11 @@ static int device_tables_alloc(struct ubi_device *ubi)
 
 	ubi->blocks.state = k_calloc(peb_count, sizeof(uint8_t));
 	ubi->blocks.erase_count = k_calloc(peb_count, sizeof(uint32_t));
+	ubi->blocks.protect = k_calloc(peb_count, sizeof(uint8_t));
 	ubi->volumes.eba_pool = k_calloc(peb_count, sizeof(uint16_t));
 
 	if (NULL == ubi->blocks.state || NULL == ubi->blocks.erase_count ||
-	    NULL == ubi->volumes.eba_pool) {
+	    NULL == ubi->blocks.protect || NULL == ubi->volumes.eba_pool) {
 		device_tables_free(ubi);
 		return -ENOMEM;
 	}
@@ -308,10 +309,12 @@ static void device_tables_free(struct ubi_device *ubi)
 {
 	k_free(ubi->blocks.state);
 	k_free(ubi->blocks.erase_count);
+	k_free(ubi->blocks.protect);
 	k_free(ubi->volumes.eba_pool);
 
 	ubi->blocks.state = NULL;
 	ubi->blocks.erase_count = NULL;
+	ubi->blocks.protect = NULL;
 	ubi->volumes.eba_pool = NULL;
 }
 
@@ -763,12 +766,8 @@ int ubi_impl_device_init(struct ubi_device *ubi,
 		ret = ubi_volume_table_read(ubi, lnum, &record);
 
 		if (0 != ret) {
-			if (-EBADMSG == ret)
-				ubi_event_emit(ubi,
-					       UBI_EVENT_VOLUME_TABLE_TAMPERED,
-					       pnum, UBI_VOLUME_TABLE_VOL_ID,
-					       lnum);
-
+			ubi_event_emit(ubi, UBI_EVENT_VOLUME_TABLE_CORRUPT,
+				       pnum, UBI_VOLUME_TABLE_VOL_ID, lnum);
 			LOG_ERR("PEB %u holds volume table copy %u and it is "
 				"unusable (%d)",
 				pnum, lnum, ret);

@@ -47,6 +47,16 @@ ZTEST(ubi_integration, test_one_damaged_volume_table_copy_is_survived)
 	zassert_equal(before.image_seq, after.image_seq);
 	zassert_equal(before.revision, after.revision);
 	zassert_true(event_seen[UBI_EVENT_VOLUME_TABLE_DEGRADED]);
+
+	/* The record carries a CRC in its sealed header, so a changed byte is
+	 * caught before the tag is ever checked. Which of the two it was
+	 * cannot be told from out here, and the report does not pretend. */
+	zassert_equal(1, event_seen[UBI_EVENT_VOLUME_TABLE_CORRUPT]);
+	zassert_true(event_last[UBI_EVENT_VOLUME_TABLE_CORRUPT].pnum <
+			     before.peb_count,
+		     "the report has to name the block it came from");
+	zassert_false(event_seen[UBI_EVENT_HDR_TAMPERED],
+		      "the headers were not touched");
 }
 
 ZTEST(ubi_integration, test_both_damaged_volume_table_copies_lose_the_device)
@@ -122,8 +132,7 @@ ZTEST(ubi_integration, test_a_damaged_erase_counter_header_is_reported)
 
 	flash_area_close(flash_area);
 
-	event_count = 0;
-	memset(event_seen, 0, sizeof(event_seen));
+	events_forget();
 
 	/* The other copy carries the device through, but the damage is still
 	 * reported. Nobody repaired the checksum, so it is damage rather than

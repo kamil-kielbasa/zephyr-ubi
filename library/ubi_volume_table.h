@@ -124,8 +124,9 @@ struct ubi_device;
  * \brief Read and verify one copy of the volume table record.
  *
  *        One flash read fetches the VID header and the record behind it. The
- *        header carries the record's length and checksum, which is what tells
- *        a write that never finished apart from one that was modified.
+ *        header carries the record's length and checksum, and the header is
+ *        sealed, so a changed record is caught by a checksum its author could
+ *        not have repaired without the key.
  *
  * \param[in] ubi                       Device holding the partition. The
  *                                      block to read is the one recorded for
@@ -143,6 +144,8 @@ struct ubi_device;
  *         finished; look for the other copy.
  * \retval -EBADMSG
  *         The bytes are complete but the tag does not verify.
+ * \retval -ENOTSUP
+ *         The record is authentic but this build cannot read its version.
  * \retval -EIO
  *         The flash driver failed.
  */
@@ -156,7 +159,7 @@ int ubi_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
  *        erase counter header and nothing else, and takes the next sequence
  *        number from the device. The VID header goes down before the record,
  *        so an interruption leaves something \ref ubi_volume_table_read
- *        reports as \c -ENOENT rather than as tampering.
+ *        reports as \c -ENOENT.
  *
  * \param[in,out] ubi                   Device holding the partition; its
  *                                      sequence number is advanced.

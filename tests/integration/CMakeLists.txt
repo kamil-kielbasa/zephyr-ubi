@@ -9,6 +9,7 @@ project(ubi_integration)
 target_sources(app PRIVATE
   src/common.c
   src/suite.c
+  src/test_ageing.c
   src/test_attach.c
   src/test_integrity.c
   src/test_leb.c

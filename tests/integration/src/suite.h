@@ -38,11 +38,11 @@ extern struct ubi_config config_wrong_key;
 /** How many events the library reported during the current test. */
 extern uint32_t event_count;
 
-/** The last one of them. */
-extern enum ubi_event_type last_event;
+/** How many of each kind, indexed by \ref ubi_event_type. */
+extern uint32_t event_seen[UBI_EVENT_PEB_BAD + 1];
 
-/** Which kinds were seen at all, indexed by \ref ubi_event_type. */
-extern bool event_seen[UBI_EVENT_PEB_BAD + 1];
+/** The last event of each kind, so a test can check what it named. */
+extern struct ubi_event event_last[UBI_EVENT_PEB_BAD + 1];
 
 /** How many times the library asked the application for a verdict. */
 extern uint32_t state_check_count;
@@ -51,6 +51,14 @@ extern uint32_t state_check_count;
 extern struct ubi_device_info last_state;
 
 /* Function declarations --------------------------------------------------- */
+
+/**
+ * \brief Forget every event recorded so far.
+ *
+ *        Lets a test draw a line after a noisy setup and speak only about
+ *        what the step under test reported.
+ */
+void events_forget(void);
 
 /**
  * \brief Trust callback that accepts whatever it is shown.

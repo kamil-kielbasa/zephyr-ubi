@@ -127,7 +127,7 @@ ZTEST(ubi_integration, test_an_update_leaves_both_volume_table_copies_current)
 	zassert_ok(ubi_volume_create(ubi, &wanted, &vol_id));
 	zassert_ok(ubi_device_deinit(ubi));
 
-	memset(event_seen, 0, sizeof(event_seen));
+	events_forget();
 	zassert_ok(ubi_device_init(ubi, &config));
 
 	zassert_false(event_seen[UBI_EVENT_VOLUME_TABLE_DEGRADED],
@@ -151,7 +151,7 @@ ZTEST(ubi_integration, test_a_degraded_volume_table_heals_on_the_next_update)
 	zassert_ok(ubi_volume_create(ubi, &wanted, &vol_id));
 	zassert_ok(ubi_device_deinit(ubi));
 
-	memset(event_seen, 0, sizeof(event_seen));
+	events_forget();
 	zassert_ok(ubi_device_init(ubi, &config));
 
 	zassert_false(event_seen[UBI_EVENT_VOLUME_TABLE_DEGRADED],
@@ -661,6 +661,83 @@ ZTEST(ubi_integration, test_shrinking_over_a_mapped_block_is_refused)
 	/* Say so explicitly and the tail may go. */
 	zassert_ok(ubi_leb_unmap(ubi, vol_id, 3));
 	zassert_ok(ubi_volume_resize(ubi, vol_id, 2));
+
+	zassert_ok(ubi_device_deinit(ubi));
+}
+
+ZTEST(ubi_integration, test_blocks_of_a_removed_volume_are_reported_as_orphaned)
+{
+	const struct ubi_volume_config wanted = { .name = "gone",
+						  .leb_count = 2 };
+	struct ubi_maintenance_result result = { 0 };
+	struct ubi_device_info info = { 0 };
+	uint32_t vol_id = UBI_VOL_ID_INVALID;
+
+	zassert_ok(ubi_device_format(&config));
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_ok(ubi_volume_create(ubi, &wanted, &vol_id));
+	volume_fill(vol_id, 0, wanted.leb_count, 0x40);
+	zassert_ok(ubi_volume_remove(ubi, vol_id));
+	zassert_ok(ubi_device_deinit(ubi));
+
+	events_forget();
+
+	/* Removal only queued the blocks, so nothing erased them. On the way
+	 * back up they still name a volume the table no longer describes, and
+	 * the application deserves to hear that its data is lying there. */
+	zassert_ok(ubi_device_init(ubi, &config));
+
+	zassert_equal(wanted.leb_count, event_seen[UBI_EVENT_LEB_ORPHANED]);
+	zassert_equal(vol_id, event_last[UBI_EVENT_LEB_ORPHANED].vol_id);
+
+	zassert_ok(ubi_device_get_info(ubi, &info));
+	zassert_equal(0, info.volume_count);
+
+	/* And the report is worth acting on: a reclaim run clears the claim,
+	 * so the next attach finds nothing left to complain about. */
+	zassert_ok(ubi_maintenance(ubi, UBI_MAINTENANCE_RECLAIM, 16, &result));
+	zassert_ok(ubi_device_deinit(ubi));
+
+	events_forget();
+
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_equal(0, event_seen[UBI_EVENT_LEB_ORPHANED]);
+
+	zassert_ok(ubi_device_deinit(ubi));
+}
+
+ZTEST(ubi_integration,
+      test_blocks_past_a_shrunk_volume_are_reported_as_orphaned)
+{
+	const struct ubi_volume_config wanted = { .name = "shrunk",
+						  .leb_count = 3 };
+	uint32_t vol_id = UBI_VOL_ID_INVALID;
+
+	zassert_ok(ubi_device_format(&config));
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_ok(ubi_volume_create(ubi, &wanted, &vol_id));
+	volume_fill(vol_id, 0, wanted.leb_count, 0x50);
+
+	/* Shrinking over a mapped block is refused, so the volume has to let
+	 * go of them first. That only clears the table, not the flash. */
+	zassert_equal(-EBUSY, ubi_volume_resize(ubi, vol_id, 1));
+	zassert_ok(ubi_leb_unmap(ubi, vol_id, 1));
+	zassert_ok(ubi_leb_unmap(ubi, vol_id, 2));
+	zassert_ok(ubi_volume_resize(ubi, vol_id, 1));
+	zassert_ok(ubi_device_deinit(ubi));
+
+	events_forget();
+
+	zassert_ok(ubi_device_init(ubi, &config));
+
+	/* The volume is still there, so this time it is the block number that
+	 * falls outside what the table describes. */
+	zassert_equal(2, event_seen[UBI_EVENT_LEB_ORPHANED]);
+	zassert_equal(vol_id, event_last[UBI_EVENT_LEB_ORPHANED].vol_id);
+	zassert_true(0 != event_last[UBI_EVENT_LEB_ORPHANED].lnum,
+		     "block 0 is still within the volume");
+
+	volume_verify(vol_id, 1, 0x50);
 
 	zassert_ok(ubi_device_deinit(ubi));
 }

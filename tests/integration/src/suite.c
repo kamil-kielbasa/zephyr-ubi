@@ -38,8 +38,8 @@ struct ubi_config config;
 struct ubi_config config_wrong_key;
 
 uint32_t event_count;
-enum ubi_event_type last_event;
-bool event_seen[UBI_EVENT_PEB_BAD + 1];
+uint32_t event_seen[UBI_EVENT_PEB_BAD + 1];
+struct ubi_event event_last[UBI_EVENT_PEB_BAD + 1];
 uint32_t state_check_count;
 struct ubi_device_info last_state;
 
@@ -87,8 +87,15 @@ static void on_event(const struct ubi_event *event, void *user_context)
 	ARG_UNUSED(user_context);
 
 	event_count += 1;
-	last_event = event->type;
-	event_seen[event->type] = true;
+	event_seen[event->type] += 1;
+	event_last[event->type] = *event;
+}
+
+void events_forget(void)
+{
+	event_count = 0;
+	memset(event_seen, 0, sizeof(event_seen));
+	memset(event_last, 0, sizeof(event_last));
 }
 
 static void *suite_setup(void)
@@ -118,9 +125,8 @@ static void before_each(void *fixture)
 {
 	ARG_UNUSED(fixture);
 
-	event_count = 0;
+	events_forget();
 	state_check_count = 0;
-	memset(event_seen, 0, sizeof(event_seen));
 	memset(&last_state, 0, sizeof(last_state));
 
 	ubi = k_malloc(ubi_device_size());

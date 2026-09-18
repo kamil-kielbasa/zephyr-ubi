@@ -125,4 +125,19 @@ void flash_fail_writes_after(uint32_t after);
  */
 void flash_fail_writes_never(void);
 
+/**
+ * \brief Read one of the flash simulator's counters.
+ *
+ * \param[in] name                      Counter to read, such as
+ *                                      \c "flash_erase_calls".
+ *
+ * \return What it stands at.
+ */
+uint32_t flash_ops(const char *name);
+
+/**
+ * \brief Put every flash simulator counter back to zero.
+ */
+void flash_ops_forget(void);
+
 #endif /* COMMON_H */

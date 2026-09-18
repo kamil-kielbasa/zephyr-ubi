@@ -358,7 +358,7 @@ ZTEST(ubi_integration, test_an_interrupted_change_leaves_the_old_contents)
 	 * of data: the header promises a checksum the data no longer has. */
 	zassert_equal(1, corrupt_data_matching(fresh, sizeof(fresh)));
 
-	memset(event_seen, 0, sizeof(event_seen));
+	events_forget();
 	zassert_ok(ubi_device_init(ubi, &config));
 
 	memset(read, 0x00, sizeof(read));

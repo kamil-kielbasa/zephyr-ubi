@@ -299,7 +299,7 @@ int ubi_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
 		LOG_ERR("PEB %u: volume table copy %u is not a record this "
 			"build can read (%d)",
 			pnum, lnum, record_status);
-		return -EBADMSG;
+		return -ENOTSUP;
 	}
 
 	return 0;

@@ -214,6 +214,9 @@ struct ubi_blocks {
 	 *  The flash field is 64-bit, but no flash survives more than a few
 	 *  million erases, so 32 bits are kept in RAM. */
 	uint32_t *erase_count;
+	/** Erases still owed to a block before levelling may move it. Counts
+	 *  down on every erase anywhere and lives only in RAM. */
+	uint8_t *protect;
 };
 
 /**
