@@ -191,7 +191,7 @@ ZTEST(ubi_integration, test_without_levelling_the_cold_blocks_never_take_a_turn)
 	struct ubi_device_info after = { 0 };
 	uint32_t vol_id = UBI_VOL_ID_INVALID;
 
-	(void)volume_under_load(&vol_id);
+	zassert_true(0 < volume_under_load(&vol_id));
 
 	zassert_ok(ubi_device_get_info(ubi, &before));
 
@@ -219,7 +219,7 @@ ZTEST(ubi_integration, test_attach_reads_the_blocks_and_writes_nothing)
 	struct ubi_device_info info = { 0 };
 	uint32_t vol_id = UBI_VOL_ID_INVALID;
 
-	(void)volume_under_load(&vol_id);
+	zassert_true(0 < volume_under_load(&vol_id));
 	zassert_ok(ubi_device_get_info(ubi, &info));
 	zassert_ok(ubi_device_deinit(ubi));
 
@@ -245,7 +245,7 @@ ZTEST(ubi_integration, test_a_change_on_a_ready_device_costs_no_erase)
 
 	memset(written, 0x5C, sizeof(written));
 
-	(void)device_ready(&vol_id);
+	zassert_true(0 < device_ready(&vol_id));
 
 	flash_ops_forget();
 	zassert_ok(ubi_leb_change(ubi, vol_id, 0, written, sizeof(written)));
@@ -269,7 +269,7 @@ ZTEST(ubi_integration, test_a_read_goes_straight_to_the_block)
 	uint32_t vol_id = UBI_VOL_ID_INVALID;
 	uint8_t read[AGEING_PAYLOAD_SIZE];
 
-	(void)device_ready(&vol_id);
+	zassert_true(0 < device_ready(&vol_id));
 
 	flash_ops_forget();
 	zassert_ok(ubi_leb_read(ubi, vol_id, 1, 0, read, sizeof(read)));
@@ -293,7 +293,7 @@ ZTEST(ubi_integration, test_reclaiming_costs_one_erase_and_one_header)
 
 	memset(written, 0x6D, sizeof(written));
 
-	(void)device_ready(&vol_id);
+	zassert_true(0 < device_ready(&vol_id));
 	zassert_ok(ubi_leb_change(ubi, vol_id, 0, written, sizeof(written)));
 
 	flash_ops_forget();
@@ -307,6 +307,36 @@ ZTEST(ubi_integration, test_reclaiming_costs_one_erase_and_one_header)
 	zassert_ok(ubi_device_deinit(ubi));
 }
 
+ZTEST(ubi_integration, test_replacing_a_lost_volume_table_copy_costs_one_erase)
+{
+	struct ubi_device_info info = { 0 };
+	struct ubi_maintenance_result result = { 0 };
+
+	zassert_ok(ubi_device_format(&config));
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_ok(ubi_device_get_info(ubi, &info));
+	zassert_ok(ubi_device_deinit(ubi));
+
+	/* Wipe the block holding the second copy, headers and all, so the
+	 * repair has to find a new block rather than reuse the old one. */
+	stamp_erase_count(config.ikm_key_id, 1, info.image_seq, 1);
+
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_true(event_seen[UBI_EVENT_VOLUME_TABLE_DEGRADED],
+		     "a copy is missing, so the pair is degraded");
+
+	flash_ops_forget();
+	zassert_ok(ubi_maintenance(ubi, UBI_MAINTENANCE_REPAIR, 1, &result));
+	zassert_equal(1, result.performed);
+
+	/* One for the surviving copy, which is reused in place. The
+	 * replacement comes off the free pool erased already. */
+	zassert_equal(1, flash_ops("flash_erase_calls"),
+		      "a commit must not erase a block it was handed erased");
+
+	zassert_ok(ubi_device_deinit(ubi));
+}
+
 ZTEST(ubi_integration, test_levelling_moves_the_block_with_the_most_life_left)
 {
 	struct ubi_maintenance_result result = { 0 };
@@ -316,7 +346,7 @@ ZTEST(ubi_integration, test_levelling_moves_the_block_with_the_most_life_left)
 
 	memset(written, 0x2E, sizeof(written));
 
-	(void)volume_under_load(&vol_id);
+	zassert_true(0 < volume_under_load(&vol_id));
 
 	/* Rewriting a block once the rotation has some wear on it puts that
 	 * block on a part-worn carrier instead of a fresh one. */

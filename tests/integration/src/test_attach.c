@@ -20,6 +20,8 @@
 /* UBI headers: */
 #include <ubi/ubi.h>
 
+#include "ubi_private.h"
+
 /* Test headers: */
 #include "common.h"
 #include "suite.h"
@@ -108,6 +110,35 @@ ZTEST(ubi_integration, test_reformatting_starts_a_new_image)
 
 	zassert_not_equal(first.image_seq, second.image_seq,
 			  "a reformat must not reuse the image sequence");
+}
+
+ZTEST(ubi_integration, test_an_exhausted_erase_counter_retires_the_block)
+{
+	struct ubi_device_info before = { 0 };
+	struct ubi_device_info after = { 0 };
+
+	zassert_ok(ubi_device_format(&config));
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_ok(ubi_device_get_info(ubi, &before));
+	zassert_ok(ubi_device_deinit(ubi));
+
+	/* The last block, so that the volume table copies are left alone. */
+	const uint32_t pnum = before.peb_count - 1;
+
+	stamp_erase_count(config.ikm_key_id, pnum, before.image_seq,
+			  (uint64_t)UBI_MAX_ERASE_COUNT + 1);
+	events_forget();
+
+	zassert_ok(ubi_device_init(ubi, &config),
+		   "one finished block must not cost the device");
+	zassert_ok(ubi_device_get_info(ubi, &after));
+	zassert_ok(ubi_device_deinit(ubi));
+
+	zassert_equal(
+		before.bad_pebs + 1, after.bad_pebs,
+		"a counter that cannot be raised leaves the block unusable");
+	zassert_equal(1, event_seen[UBI_EVENT_PEB_BAD]);
+	zassert_equal(before.revision, after.revision);
 }
 
 ZTEST(ubi_integration, test_a_wrong_key_is_refused_without_damage)

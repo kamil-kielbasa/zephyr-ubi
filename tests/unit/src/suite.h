@@ -21,10 +21,10 @@
 /** The PSA key holding the suite's keying material. */
 extern psa_key_id_t ikm_key;
 
-/** Key the headers are tagged with, derived from it. */
+/** Key the headers are authenticated with, derived from it. */
 extern psa_key_id_t key_header;
 
-/** Key the volume table record is tagged with. */
+/** Key the volume table record is authenticated with. */
 extern psa_key_id_t key_volume_table;
 
 #endif /* SUITE_H */

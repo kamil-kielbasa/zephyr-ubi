@@ -11,7 +11,7 @@ target_sources(app PRIVATE
   src/suite.c
   src/test_header.c
   src/test_key.c
-  src/test_tag.c
+  src/test_mac.c
 )
 
 # Header serialization and key derivation have no public API of their own, so

@@ -146,8 +146,8 @@ exit:
 
 /* Module interface function definitions ----------------------------------- */
 
-int ubi_key_derive(psa_key_id_t ikm_key_id, psa_key_id_t *key_header,
-		   psa_key_id_t *key_volume_table)
+int ubi_impl_key_derive(psa_key_id_t ikm_key_id, psa_key_id_t *key_header,
+			psa_key_id_t *key_volume_table)
 {
 	psa_status_t status = PSA_ERROR_GENERIC_ERROR;
 	int ret = 0;
@@ -183,14 +183,14 @@ int ubi_key_derive(psa_key_id_t ikm_key_id, psa_key_id_t *key_header,
 		LOG_ERR("deriving the volume table key failed (%d), "
 			"psa_status=%d",
 			ret, (int)status);
-		ubi_key_destroy(key_header);
+		ubi_impl_key_destroy(key_header);
 		return ret;
 	}
 
 	return 0;
 }
 
-void ubi_key_destroy(psa_key_id_t *key_id)
+void ubi_impl_key_destroy(psa_key_id_t *key_id)
 {
 	psa_status_t status = PSA_SUCCESS;
 

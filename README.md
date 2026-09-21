@@ -6,7 +6,7 @@ It maps logical erase blocks onto physical ones, spreads wear across the
 partition, survives power loss, and authenticates its own metadata with
 AES-CMAC so that a changed header is noticed rather than obeyed.
 
-The on-flash headers follow Linux UBI field for field, with the tag placed in
+The on-flash headers follow Linux UBI field for field, with the MAC placed in
 space Linux reserves as padding. An erase counter header written here passes
 validation in unmodified Linux UBI.
 
@@ -97,11 +97,13 @@ what makes a write cost no erase at all.
 
 ## Documentation
 
+Three short documents. The full contract for every call lives in
+[include/ubi/ubi.h](include/ubi/ubi.h).
+
 | | |
 |---|---|
-| [doc/api-walkthrough.md](doc/api-walkthrough.md) | the API, scenario by scenario |
-| [doc/how-it-works.md](doc/how-it-works.md) | the model: blocks, attach, pools, maintenance, and what came from Linux |
-| [doc/on-flash-format.md](doc/on-flash-format.md) | byte layouts, what the tag covers, key derivation |
+| [doc/how-it-works.md](doc/how-it-works.md) | blocks, attach, pools, maintenance, and what came from Linux |
+| [doc/on-flash-format.md](doc/on-flash-format.md) | byte layouts, what the MAC covers, key derivation |
 | [doc/security.md](doc/security.md) | threat model, the boundary, and the contract for your own encryption |
 
 ## Building and testing

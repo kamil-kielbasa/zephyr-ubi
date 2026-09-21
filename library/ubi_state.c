@@ -28,8 +28,21 @@ LOG_MODULE_DECLARE(ubi, CONFIG_UBI_LOG_LEVEL);
 
 /* Module interface function definitions ----------------------------------- */
 
-int ubi_state_describe(const struct ubi_device *ubi,
-		       struct ubi_device_info *info)
+void ubi_impl_event_emit(const struct ubi_device *ubi, enum ubi_event_type type,
+			 uint32_t pnum, uint32_t vol_id, uint32_t lnum)
+{
+	const struct ubi_event event = {
+		.type = type,
+		.pnum = pnum,
+		.vol_id = vol_id,
+		.lnum = lnum,
+	};
+
+	ubi->callbacks.event(&event, ubi->callbacks.user_context);
+}
+
+int ubi_impl_state_describe(const struct ubi_device *ubi,
+			    struct ubi_device_info *info)
 {
 	struct ubi_device_info measured = {
 		.peb_count = ubi->geometry.peb_count,
@@ -44,7 +57,8 @@ int ubi_state_describe(const struct ubi_device *ubi,
 	uint32_t lowest_erase_count = UINT32_MAX;
 
 	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
-		const enum ubi_peb_state state = ubi_peb_state_get(ubi, pnum);
+		const enum ubi_peb_state state =
+			ubi_impl_peb_state_get(ubi, pnum);
 		const uint32_t erase_count = ubi->blocks.erase_count[pnum];
 
 		switch (state) {
@@ -58,6 +72,9 @@ int ubi_state_describe(const struct ubi_device *ubi,
 		case UBI_PEB_BAD:
 		case UBI_PEB_WORN_OUT:
 			measured.bad_pebs += 1;
+			break;
+		case UBI_PEB_CORRUPT:
+			measured.corrupt_pebs += 1;
 			break;
 		case UBI_PEB_MAPPED:
 			break;
@@ -89,7 +106,7 @@ int ubi_state_describe(const struct ubi_device *ubi,
 	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
 		const uint32_t erase_count = ubi->blocks.erase_count[pnum];
 
-		if (UBI_PEB_MAPPED != ubi_peb_state_get(ubi, pnum))
+		if (UBI_PEB_MAPPED != ubi_impl_peb_state_get(ubi, pnum))
 			continue;
 
 		if (measured.max_erase_count - erase_count >
@@ -97,20 +114,20 @@ int ubi_state_describe(const struct ubi_device *ubi,
 			measured.relocatable_pebs += 1;
 	}
 
-	measured.free_lebs = ubi_volumes_leb_free(ubi);
+	measured.free_lebs = ubi_impl_volumes_leb_free(ubi);
 
 	*info = measured;
 
 	return 0;
 }
 
-int ubi_state_check(struct ubi_device *ubi)
+int ubi_impl_state_check(struct ubi_device *ubi)
 {
 	if (ubi->untrusted)
 		return -EROFS;
 
 	struct ubi_device_info info = { 0 };
-	const int ret = ubi_state_describe(ubi, &info);
+	const int ret = ubi_impl_state_describe(ubi, &info);
 
 	if (0 != ret) {
 		LOG_ERR("the block state table is not one this build wrote");
@@ -129,7 +146,7 @@ int ubi_state_check(struct ubi_device *ubi)
 	return -EROFS;
 }
 
-int ubi_state_guard(struct ubi_device *ubi)
+int ubi_impl_state_guard(struct ubi_device *ubi)
 {
 	if (ubi->untrusted)
 		return -EROFS;
@@ -137,5 +154,5 @@ int ubi_state_guard(struct ubi_device *ubi)
 	if (CONFIG_UBI_STATE_CHECK_INTERVAL > ubi->writes_since_check)
 		return 0;
 
-	return ubi_state_check(ubi);
+	return ubi_impl_state_check(ubi);
 }

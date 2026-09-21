@@ -17,7 +17,7 @@ A LEB is smaller than a PEB by the 128 bytes the two headers take.
 
 ## What a block can be
 
-Every PEB is in one of six states, all of them RAM-only:
+Every PEB is in one of seven states, all of them RAM-only:
 
 | state | meaning |
 |---|---|
@@ -25,12 +25,23 @@ Every PEB is in one of six states, all of them RAM-only:
 | `FREE` | erased, stamped with an erase counter, waiting |
 | `MAPPED` | carries a logical block |
 | `RECLAIM` | its contents are dead; an erase will hand it back |
+| `CORRUPT` | damaged behind a valid erase counter header; preserved unread |
 | `BAD` | refused an operation once, and will get one more chance |
 | `WORN_OUT` | refused again; out of service until the next attach |
 
 Retirement lives only in RAM on purpose. A block that failed a write may well
 be fine after a power cycle, and nothing is gained by writing that verdict down
 where it cannot be revised.
+
+`CORRUPT` is the one state nothing reclaims. When a block's erase counter
+header verifies but the volume identifier header behind it does not, the data
+area decides: all erased bytes means a write cut short, which is ordinary and
+safe to erase; anything else is damage of unknown origin and the block is kept
+as it is. Erasing it would destroy the only copy of whatever it still holds,
+and the event that reported the damage would be all that is left of it. Linux
+UBI preserves the same blocks on the same reasoning, and like Linux this
+refuses the attach outright once more than a twentieth of the partition is in
+that state.
 
 ## Attach
 
@@ -86,9 +97,13 @@ so the next attach maps it again. To lose data for good, erase the block with
 ## Pools
 
 The free pool is what writes draw from, and maintenance is what fills it. A
-block is allocated by taking the **least worn** free block, which spreads wear
-without any bookkeeping: writing to it makes it no longer the least worn, so
-the next write goes elsewhere.
+block is allocated by taking the most worn free block that is still within
+`CONFIG_UBI_WEAR_LEVELING_THRESHOLD` erases of the least worn one. Taking the
+extreme in either direction is what Linux UBI avoids and for the same reason:
+always picking the freshest block wears it out on its own, and always picking
+the most worn one does the same at the other end. Linux bounds the same search
+with `wl_free_max_diff`, which is twice its threshold; the halves and doubles
+here line up with it.
 
 Two blocks are reserved beyond what volumes can claim — the two copies of the
 volume table — plus one spare so that a commit always has somewhere to go.
@@ -103,20 +118,22 @@ did and what is left.
 them with a fresh erase counter. This is where the cost of an erase is paid.
 Keeping it topped up is what makes a write cost no erase at all.
 
-**`UBI_MAINTENANCE_RELOCATE`** is wear levelling. When the gap between the most
-worn block and some block in use exceeds `CONFIG_UBI_WEAR_LEVELING_THRESHOLD`,
-the contents of the least worn such block are copied onto the most worn free
-one, and the block with more life left goes back into rotation. The data's
-checksum is verified on the way, never recomputed — moving a block must not
-launder damage into a fresh seal.
+**`UBI_MAINTENANCE_RELOCATE`** is wear levelling. The block it would move onto
+is picked first; when the gap between that block and some block in use exceeds
+`CONFIG_UBI_WEAR_LEVELING_THRESHOLD`, the contents of the least worn such block
+are copied over and the block with more life left goes back into rotation.
+Judging the gap against the block actually available, rather than against the
+most worn block on the device, is what keeps levelling from moving data onto
+something no better than where it already was. Linux settles it the same way in
+`ensure_wear_leveling()`. The data's checksum is verified on the way, never
+recomputed — moving a block must not launder damage into a fresh seal.
 
 A block that was just handed out is left alone for
-`CONFIG_UBI_PROTECTION_CYCLES` erases. It is the least worn block in use the
-moment anything lands on it, so levelling would reach for it first, and moving
-data the caller has only just written — and may be about to replace — is wasted
-work. Without this guard, a pool of worn blocks suddenly flooded with barely
-used ones (say, after a cold volume is removed) will relocate *every* write
-straight back out, doubling the erase count.
+`CONFIG_UBI_PROTECTION_CYCLES` erases, because moving data the caller has only
+just written — and may be about to replace — is wasted work. Without this
+guard, a pool of worn blocks suddenly flooded with barely used ones (say, after
+a cold volume is removed) will relocate *every* write straight back out,
+doubling the erase count.
 
 **`UBI_MAINTENANCE_REPAIR`** brings the two copies of the volume table back
 into agreement, and gives retired blocks a second chance. A block that fails
@@ -130,7 +147,7 @@ Two callbacks, both required. Ignoring what UBI finds has to be something the
 application writes down, not something it inherits from a zeroed field.
 
 The **event callback** reports damage and inconsistency as they are found:
-a header that failed its CRC, a header whose CRC passed but whose tag did not,
+a header that failed its CRC, a header whose CRC passed but whose MAC did not,
 a lost copy of the volume table, an orphaned block, a retired block.
 
 The **state callback** is a trust check. It is consulted at the end of every
@@ -141,7 +158,7 @@ where rollback detection belongs — see [security.md](security.md).
 
 ## Relation to Linux UBI
 
-The on-flash headers are Linux's, field for field, with a tag placed in space
+The on-flash headers are Linux's, field for field, with a MAC placed in space
 Linux reserves as padding. An erase counter header written here passes
 validation in unmodified Linux UBI.
 
@@ -152,8 +169,13 @@ What is kept:
 - `copy_flag` left clear on an append, so a later write cannot invalidate a
   seal written before it
 - wear levelling driven by the gap between the least worn block in use and the
-  most worn free one
+  block it would actually be moved onto
+- both ends of the free pool bounded, so that neither the freshest nor the most
+  worn block absorbs everything
 - a freshly handed out block protected from being moved for a while
+- blocks damaged behind a valid erase counter header preserved rather than
+  erased, and an attach refused once too many of them pile up
+- erase counters bounded at 31 bits, as Linux bounds them
 - retirement held in RAM, never written to the flash
 
 What is deliberately not ported:

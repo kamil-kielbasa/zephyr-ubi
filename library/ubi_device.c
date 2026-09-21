@@ -28,7 +28,6 @@
 #include "ubi_io.h"
 #include "ubi_key.h"
 #include "ubi_device.h"
-#include "ubi_event.h"
 #include "ubi_peb.h"
 #include "ubi_private.h"
 #include "ubi_state.h"
@@ -44,6 +43,14 @@ LOG_MODULE_DECLARE(ubi, CONFIG_UBI_LOG_LEVEL);
 
 /** Sentinel for "no copy of the volume table was adopted". */
 #define VOLUME_TABLE_COPY_NONE (UINT32_MAX)
+
+/** Bytes read at a time when looking for anything left in a data area. */
+#define SCAN_CHUNK (128)
+
+/** Share of the partition that may be corrupted before attach gives up,
+ *  and the floor Linux UBI applies to it on a small partition. */
+#define CORRUPT_PEB_SHARE (20)
+#define CORRUPT_PEB_FLOOR (8)
 
 BUILD_ASSERT(UBI_LEB_UNMAPPED == UINT16_MAX,
 	     "the unmapped sentinel must be all ones, so that memset sets it");
@@ -73,13 +80,13 @@ struct volume_table_copy {
 /**
  * \brief Ask the flash driver for the dimensions of the partition.
  */
-static int geometry_measure(const struct flash_area *flash_area,
-			    struct ubi_geometry *geometry);
+static int device_geometry_measure(const struct flash_area *flash_area,
+				   struct ubi_geometry *geometry);
 
 /**
  * \brief Report whether this build can manage those dimensions.
  */
-static int geometry_validate(const struct ubi_geometry *geometry);
+static int device_geometry_validate(const struct ubi_geometry *geometry);
 
 /**
  * \brief Open the partition, measure it and derive the device keys.
@@ -122,20 +129,94 @@ static void device_tables_free(struct ubi_device *ubi);
 /**
  * \brief Draw an image sequence number that is not zero.
  */
-static int image_seq_draw(uint32_t *image_seq);
+static int device_image_seq_draw(uint32_t *image_seq);
 
 /**
  * \brief Report whether every copy of the record says the same thing, so that
  *        losing any one of them costs nothing.
  */
 static bool
-volume_table_copies_agree(const struct volume_table_copy *copy, size_t count,
-			  const struct ubi_volume_table_record *record);
+device_volume_table_copies_agree(const struct volume_table_copy *copy,
+				 size_t count,
+				 const struct ubi_volume_table_record *record);
 
 /**@}*/
 
 /** \name Scanning the partition */
 /**@{*/
+
+/**
+ * \brief Classify a block whose erase counter header verified but whose
+ *        volume identifier header did not.
+ *
+ *        A blank data area means a write that was cut short, which is
+ *        ordinary and safe to erase. Anything else is damage of unknown
+ *        origin: Linux UBI preserves those blocks rather than destroying
+ *        what they still hold, and so does this.
+ *
+ * \return #UBI_PEB_UNKNOWN, #UBI_PEB_CORRUPT or #UBI_PEB_BAD.
+ */
+static enum ubi_peb_state device_damaged_state(const struct ubi_device *ubi,
+					       uint32_t pnum);
+
+/**
+ * \brief Refuse a partition that carries more damage than it can be worth
+ *        attaching.
+ *
+ * \retval 0
+ *         Few enough blocks are corrupted to carry on.
+ * \retval -EINVAL
+ *         Too many, and the partition is probably not what it looks like.
+ */
+static int device_corruption_check(const struct ubi_device *ubi);
+
+/**
+ * \brief Act on what the erase counter header turned out to be.
+ *
+ * \param[out] unopenable               Bumped when the header is well formed
+ *                                      but will not verify under this key.
+ *
+ * \return Whether the block is worth looking at any further.
+ */
+static bool device_scan_ec(struct ubi_device *ubi, uint32_t pnum,
+			   const struct ubi_headers *headers,
+			   uint32_t *unopenable);
+
+/**
+ * \brief Act on what the volume identifier header turned out to be.
+ *
+ * \return Whether the block backs a logical erase block.
+ */
+static bool device_scan_vid(struct ubi_device *ubi, uint32_t pnum,
+			    const struct ubi_headers *headers);
+
+/**
+ * \brief Remember which block holds each copy of the volume table record.
+ */
+static void device_scan_volume_table(struct ubi_device *ubi, uint32_t pnum,
+				     const struct ubi_vid_header *vid);
+
+/**
+ * \brief Classify one block by the headers it carries.
+ *
+ *        Cannot fail: a block that will not say what it holds is recorded as
+ *        unusable, which is an answer. Attach must survive a damaged block,
+ *        so every path here ends in a state and an event, never an error.
+ */
+static void device_scan_peb(struct ubi_device *ubi, uint32_t pnum,
+			    uint32_t *unopenable);
+
+/**
+ * \brief Decide which of two blocks claiming the same logical block is the
+ *        older copy.
+ *
+ *        Linux UBI settles the same question in \c ubi_compare_lebs().
+ *
+ * \return The block to queue for reclaim.
+ */
+static uint32_t device_leb_older(const struct ubi_device *ubi,
+				 uint32_t incumbent, uint32_t pnum,
+				 uint64_t sqnum);
 
 /**
  * \brief First of two passes: classify every block and find the volume table.
@@ -147,13 +228,14 @@ volume_table_copies_agree(const struct volume_table_copy *copy, size_t count,
  *        copy of the volume table record.
  *
  *        \p unopenable counts blocks whose header is well formed but whose
- *        tag does not verify: what separates a wrong key from a partition
+ *        MAC does not verify: what separates a wrong key from a partition
  *        that was never formatted.
  *
  *        The caller must adopt one of those records, and set \c image_seq and
  *        the volumes from it, before running the second pass.
  */
-static void scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable);
+static void device_scan_first_pass(struct ubi_device *ubi,
+				   uint32_t *unopenable);
 
 /**
  * \brief Second of two passes: apply what the volume table settled.
@@ -165,14 +247,14 @@ static void scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable);
  *        because the first pass had to settle them before the record they
  *        hold could be read.
  */
-static void scan_second_pass(struct ubi_device *ubi);
+static void device_scan_second_pass(struct ubi_device *ubi);
 
 /**@}*/
 
 /* Static function definitions --------------------------------------------- */
 
-static int geometry_measure(const struct flash_area *flash_area,
-			    struct ubi_geometry *geometry)
+static int device_geometry_measure(const struct flash_area *flash_area,
+				   struct ubi_geometry *geometry)
 {
 	const struct device *device = flash_area_get_device(flash_area);
 
@@ -208,7 +290,7 @@ static int geometry_measure(const struct flash_area *flash_area,
 	return 0;
 }
 
-static int geometry_validate(const struct ubi_geometry *geometry)
+static int device_geometry_validate(const struct ubi_geometry *geometry)
 {
 	/* Every volume this build allows has to fit one logical block, and
 	 * every write has to land on a whole number of write blocks. */
@@ -238,7 +320,7 @@ static int device_open(struct ubi_device *ubi, const struct ubi_config *config)
 
 	ubi->flash_area = flash_area;
 
-	ret = geometry_measure(flash_area, &ubi->geometry);
+	ret = device_geometry_measure(flash_area, &ubi->geometry);
 
 	if (0 != ret) {
 		flash_area_close(flash_area);
@@ -246,7 +328,7 @@ static int device_open(struct ubi_device *ubi, const struct ubi_config *config)
 		return ret;
 	}
 
-	ret = geometry_validate(&ubi->geometry);
+	ret = device_geometry_validate(&ubi->geometry);
 
 	if (0 != ret) {
 		flash_area_close(flash_area);
@@ -254,8 +336,8 @@ static int device_open(struct ubi_device *ubi, const struct ubi_config *config)
 		return ret;
 	}
 
-	ret = ubi_key_derive(config->ikm_key_id, &ubi->keys.header,
-			     &ubi->keys.volume_table);
+	ret = ubi_impl_key_derive(config->ikm_key_id, &ubi->keys.header,
+				  &ubi->keys.volume_table);
 
 	if (0 != ret) {
 		flash_area_close(flash_area);
@@ -277,8 +359,8 @@ static int device_open(struct ubi_device *ubi, const struct ubi_config *config)
 
 static void device_close(struct ubi_device *ubi)
 {
-	ubi_key_destroy(&ubi->keys.header);
-	ubi_key_destroy(&ubi->keys.volume_table);
+	ubi_impl_key_destroy(&ubi->keys.header);
+	ubi_impl_key_destroy(&ubi->keys.volume_table);
 	flash_area_close(ubi->flash_area);
 	ubi->flash_area = NULL;
 }
@@ -318,7 +400,7 @@ static void device_tables_free(struct ubi_device *ubi)
 	ubi->volumes.eba_pool = NULL;
 }
 
-static int image_seq_draw(uint32_t *image_seq)
+static int device_image_seq_draw(uint32_t *image_seq)
 {
 	/* Zero marks "no image", so a fresh one must not land on it. */
 	for (uint32_t attempt = 0; attempt < IMAGE_SEQ_DRAW_LIMIT; ++attempt) {
@@ -339,8 +421,9 @@ static int image_seq_draw(uint32_t *image_seq)
 }
 
 static bool
-volume_table_copies_agree(const struct volume_table_copy *copy, size_t count,
-			  const struct ubi_volume_table_record *record)
+device_volume_table_copies_agree(const struct volume_table_copy *copy,
+				 size_t count,
+				 const struct ubi_volume_table_record *record)
 {
 	for (size_t i = 0; i < count; ++i) {
 		if (!copy[i].readable ||
@@ -352,133 +435,231 @@ volume_table_copies_agree(const struct volume_table_copy *copy, size_t count,
 	return true;
 }
 
-static void scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable)
+static enum ubi_peb_state device_damaged_state(const struct ubi_device *ubi,
+					       uint32_t pnum)
 {
-	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
-		struct ubi_headers headers = { 0 };
-		const int ret = ubi_headers_read(ubi, pnum, &headers);
+	uint8_t chunk[SCAN_CHUNK];
 
-		if (0 != ret) {
-			LOG_WRN("PEB %u: unreadable, retiring it", pnum);
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_BAD);
-			ubi_event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
-				       UBI_VOL_ID_INVALID, 0);
-			continue;
+	for (uint32_t at = 0; at < ubi->geometry.leb_size;
+	     at += sizeof(chunk)) {
+		const uint32_t length =
+			MIN(sizeof(chunk), ubi->geometry.leb_size - at);
+
+		if (0 != ubi_impl_io_read_data(ubi, pnum, at, chunk, length))
+			return UBI_PEB_BAD;
+
+		for (uint32_t i = 0; i < length; ++i) {
+			if (ubi->geometry.erase_value != chunk[i])
+				return UBI_PEB_CORRUPT;
 		}
-
-		switch (headers.ec_status) {
-		case UBI_HEADER_OK:
-			break;
-		case UBI_HEADER_ERASED:
-		case UBI_HEADER_NOT_UBI:
-			/* Blank, or someone else's bytes; erase before use. */
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
-			continue;
-		case UBI_HEADER_CORRUPT:
-			/* An interrupted stamp, so the block itself is fine. */
-			ubi_event_emit(ubi, UBI_EVENT_HDR_CORRUPT, pnum,
-				       UBI_VOL_ID_INVALID, 0);
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
-			continue;
-		case UBI_HEADER_TAMPERED:
-			/* A well-formed header under a key this build does not
-			 * hold; counting those apart keeps a mistyped key from
-			 * looking like a blank partition. */
-			*unopenable += 1;
-			ubi_event_emit(ubi, UBI_EVENT_HDR_TAMPERED, pnum,
-				       UBI_VOL_ID_INVALID, 0);
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_BAD);
-			continue;
-		case UBI_HEADER_ERROR:
-		default:
-			ubi_event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
-				       UBI_VOL_ID_INVALID, 0);
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_BAD);
-			continue;
-		}
-
-		ubi->blocks.erase_count[pnum] =
-			(uint32_t)headers.ec.erase_count;
-
-		/* The erase counter header verified under this key, so damage
-		 * behind it condemns one block, not the whole device. */
-		switch (headers.vid_status) {
-		case UBI_HEADER_OK:
-			break;
-		case UBI_HEADER_ERASED:
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_FREE);
-			continue;
-		case UBI_HEADER_NOT_UBI:
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
-			continue;
-		case UBI_HEADER_CORRUPT:
-			ubi_event_emit(ubi, UBI_EVENT_HDR_CORRUPT, pnum,
-				       UBI_VOL_ID_INVALID, 0);
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
-			continue;
-		case UBI_HEADER_TAMPERED:
-			ubi_event_emit(ubi, UBI_EVENT_HDR_TAMPERED, pnum,
-				       UBI_VOL_ID_INVALID, 0);
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
-			continue;
-		case UBI_HEADER_ERROR:
-		default:
-			ubi_event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
-				       UBI_VOL_ID_INVALID, 0);
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
-			continue;
-		}
-
-		ubi_peb_state_set(ubi, pnum, UBI_PEB_MAPPED);
-
-		if (headers.vid.sqnum > ubi->global_sqnum)
-			ubi->global_sqnum = headers.vid.sqnum;
-
-		if (UBI_VOLUME_TABLE_VOL_ID != headers.vid.vol_id)
-			continue;
-
-		const uint32_t lnum = headers.vid.lnum;
-
-		/* A block claiming a copy that does not exist is left for the
-		 * second pass to queue for reclaim. */
-		if (lnum >= UBI_VOLUME_TABLE_LEB_COUNT)
-			continue;
-
-		/*
-		 * Several formats can have left records behind, so the newest
-		 * sequence number wins. It is the fresh one by construction:
-		 * a format starts its numbering above everything it finds.
-		 * The blocks that lose are left as they are, for the second
-		 * pass to judge once the image is known.
-		 */
-		if (UBI_LEB_UNMAPPED != ubi->volume_table.eba[lnum] &&
-		    headers.vid.sqnum <= ubi->volume_table.sqnum[lnum])
-			continue;
-
-		ubi->volume_table.eba[lnum] = (uint16_t)pnum;
-		ubi->volume_table.sqnum[lnum] = headers.vid.sqnum;
 	}
+
+	return UBI_PEB_UNKNOWN;
 }
 
-static void scan_second_pass(struct ubi_device *ubi)
+static int device_corruption_check(const struct ubi_device *ubi)
+{
+	const uint32_t allowed = MAX(
+		ubi->geometry.peb_count / CORRUPT_PEB_SHARE, CORRUPT_PEB_FLOOR);
+	uint32_t corrupted = 0;
+
+	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
+		if (UBI_PEB_CORRUPT == ubi_impl_peb_state_get(ubi, pnum))
+			corrupted += 1;
+	}
+
+	if (corrupted < allowed)
+		return 0;
+
+	LOG_ERR("%u of %u blocks are corrupted, more than the %u this "
+		"partition can be carried with",
+		corrupted, ubi->geometry.peb_count, allowed);
+
+	return -EINVAL;
+}
+
+static bool device_scan_ec(struct ubi_device *ubi, uint32_t pnum,
+			   const struct ubi_headers *headers,
+			   uint32_t *unopenable)
+{
+	switch (headers->ec_status) {
+	case UBI_HEADER_OK:
+		break;
+	case UBI_HEADER_ERASED:
+	case UBI_HEADER_NOT_UBI:
+		/* Blank, or someone else's bytes; erase before use. */
+		ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+		return false;
+	case UBI_HEADER_CORRUPT:
+		/* An interrupted stamp, so the block itself is fine. */
+		ubi_impl_event_emit(ubi, UBI_EVENT_HDR_CORRUPT, pnum,
+				    UBI_VOL_ID_INVALID, 0);
+		ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+		return false;
+	case UBI_HEADER_TAMPERED:
+		/* A well-formed header under a key this build does not hold;
+		 * counting those apart keeps a mistyped key from looking like
+		 * a blank partition. */
+		*unopenable += 1;
+		ubi_impl_event_emit(ubi, UBI_EVENT_HDR_TAMPERED, pnum,
+				    UBI_VOL_ID_INVALID, 0);
+		ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_BAD);
+		return false;
+	case UBI_HEADER_ERROR:
+	default:
+		ubi_impl_event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
+				    UBI_VOL_ID_INVALID, 0);
+		ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_BAD);
+		return false;
+	}
+
+	if (headers->ec.erase_count > UBI_MAX_ERASE_COUNT) {
+		LOG_ERR("PEB %u: erase count %llu is past what UBI writes, "
+			"taking the block out of service",
+			pnum, headers->ec.erase_count);
+		ubi_impl_event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
+				    UBI_VOL_ID_INVALID, 0);
+		ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_BAD);
+		return false;
+	}
+
+	return true;
+}
+
+static bool device_scan_vid(struct ubi_device *ubi, uint32_t pnum,
+			    const struct ubi_headers *headers)
+{
+	/* The erase counter header verified under this key, so damage behind
+	 * it condemns one block, not the whole device. */
+	switch (headers->vid_status) {
+	case UBI_HEADER_OK:
+		return true;
+	case UBI_HEADER_ERASED:
+		ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_FREE);
+		return false;
+	case UBI_HEADER_NOT_UBI:
+		break;
+	case UBI_HEADER_CORRUPT:
+		ubi_impl_event_emit(ubi, UBI_EVENT_HDR_CORRUPT, pnum,
+				    UBI_VOL_ID_INVALID, 0);
+		break;
+	case UBI_HEADER_TAMPERED:
+		ubi_impl_event_emit(ubi, UBI_EVENT_HDR_TAMPERED, pnum,
+				    UBI_VOL_ID_INVALID, 0);
+		break;
+	case UBI_HEADER_ERROR:
+	default:
+		ubi_impl_event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
+				    UBI_VOL_ID_INVALID, 0);
+		ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+		return false;
+	}
+
+	ubi_impl_peb_state_set(ubi, pnum, device_damaged_state(ubi, pnum));
+
+	return false;
+}
+
+static void device_scan_volume_table(struct ubi_device *ubi, uint32_t pnum,
+				     const struct ubi_vid_header *vid)
+{
+	/* Left mapped for the second pass to queue for reclaim. */
+	if (vid->lnum >= UBI_VOLUME_TABLE_LEB_COUNT) {
+		LOG_WRN("PEB %u: claims volume table copy %u, of which there "
+			"are only %d",
+			pnum, vid->lnum, UBI_VOLUME_TABLE_LEB_COUNT);
+		return;
+	}
+
+	/*
+	 * Several formats can have left records behind, so the newest sequence
+	 * number wins. It is the fresh one by construction: a format starts
+	 * its numbering above everything it finds. The blocks that lose are
+	 * left as they are, for the second pass to judge once the image is
+	 * known.
+	 */
+	if (UBI_LEB_UNMAPPED != ubi->volume_table.eba[vid->lnum] &&
+	    vid->sqnum <= ubi->volume_table.sqnum[vid->lnum]) {
+		LOG_DBG("PEB %u: holds a superseded volume table copy %u", pnum,
+			vid->lnum);
+		return;
+	}
+
+	ubi->volume_table.eba[vid->lnum] = (uint16_t)pnum;
+	ubi->volume_table.sqnum[vid->lnum] = vid->sqnum;
+}
+
+static void device_scan_peb(struct ubi_device *ubi, uint32_t pnum,
+			    uint32_t *unopenable)
+{
+	struct ubi_headers headers = { 0 };
+
+	if (0 != ubi_impl_header_read(ubi, pnum, &headers)) {
+		LOG_WRN("PEB %u: unreadable, retiring it", pnum);
+		ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_BAD);
+		ubi_impl_event_emit(ubi, UBI_EVENT_PEB_BAD, pnum,
+				    UBI_VOL_ID_INVALID, 0);
+		return;
+	}
+
+	if (!device_scan_ec(ubi, pnum, &headers, unopenable))
+		return;
+
+	ubi->blocks.erase_count[pnum] = (uint32_t)headers.ec.erase_count;
+
+	if (!device_scan_vid(ubi, pnum, &headers))
+		return;
+
+	ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_MAPPED);
+
+	if (headers.vid.sqnum > ubi->global_sqnum)
+		ubi->global_sqnum = headers.vid.sqnum;
+
+	if (UBI_VOLUME_TABLE_VOL_ID == headers.vid.vol_id)
+		device_scan_volume_table(ubi, pnum, &headers.vid);
+}
+
+static uint32_t device_leb_older(const struct ubi_device *ubi,
+				 uint32_t incumbent, uint32_t pnum,
+				 uint64_t sqnum)
+{
+	struct ubi_headers other = { 0 };
+	uint64_t incumbent_sqnum = 0;
+
+	/* A block that will not say how old it is loses to one that will. */
+	if (0 == ubi_impl_header_read(ubi, incumbent, &other) &&
+	    UBI_HEADER_OK == other.vid_status)
+		incumbent_sqnum = other.vid.sqnum;
+
+	return (incumbent_sqnum > sqnum) ? pnum : incumbent;
+}
+
+static void device_scan_first_pass(struct ubi_device *ubi, uint32_t *unopenable)
+{
+	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum)
+		device_scan_peb(ubi, pnum, unopenable);
+}
+
+static void device_scan_second_pass(struct ubi_device *ubi)
 {
 	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
-		const enum ubi_peb_state state = ubi_peb_state_get(ubi, pnum);
+		const enum ubi_peb_state state =
+			ubi_impl_peb_state_get(ubi, pnum);
 
 		if (UBI_PEB_FREE != state && UBI_PEB_MAPPED != state)
 			continue;
 
 		struct ubi_headers headers = { 0 };
-		int ret = ubi_headers_read(ubi, pnum, &headers);
+		int ret = ubi_impl_header_read(ubi, pnum, &headers);
 
 		if (0 != ret) {
 			LOG_WRN("PEB %u: became unreadable, retiring it", pnum);
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_BAD);
+			ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_BAD);
 			continue;
 		}
 
 		if (UBI_HEADER_OK != headers.ec_status) {
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+			ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		}
 
@@ -487,7 +668,7 @@ static void scan_second_pass(struct ubi_device *ubi)
 			 * refuses the whole attach, we reclaim the block. */
 			LOG_DBG("PEB %u: belongs to image 0x%08x, not 0x%08x",
 				pnum, headers.ec.image_seq, ubi->image_seq);
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+			ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		}
 
@@ -496,7 +677,7 @@ static void scan_second_pass(struct ubi_device *ubi)
 			continue;
 
 		if (UBI_HEADER_OK != headers.vid_status) {
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
+			ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_UNKNOWN);
 			continue;
 		}
 
@@ -509,70 +690,59 @@ static void scan_second_pass(struct ubi_device *ubi)
 			    pnum == ubi->volume_table.eba[vid->lnum])
 				continue;
 
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
+			ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
 			continue;
 		}
 
 		uint16_t incumbent = UBI_LEB_UNMAPPED;
 
-		ret = ubi_volume_leb_get(ubi, vid->vol_id, vid->lnum,
-					 &incumbent);
+		ret = ubi_impl_volume_leb_get(ubi, vid->vol_id, vid->lnum,
+					      &incumbent);
 
 		if (0 != ret) {
 			LOG_WRN("PEB %u: claims volume %u block %u, which the "
 				"volume table does not describe (%d); queued "
 				"for reclaim",
 				pnum, vid->vol_id, vid->lnum, ret);
-			ubi_event_emit(ubi, UBI_EVENT_LEB_ORPHANED, pnum,
-				       vid->vol_id, vid->lnum);
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
+			ubi_impl_event_emit(ubi, UBI_EVENT_LEB_ORPHANED, pnum,
+					    vid->vol_id, vid->lnum);
+			ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
 			continue;
 		}
 
 		/* A sealed header promises a length and a checksum over the
 		 * data behind it, so a write cut short by a power loss is
 		 * recognisable here and must not win the block. */
-		if (0 != ubi_vid_header_data_verify(ubi, pnum, vid)) {
+		if (0 != ubi_impl_header_vid_data_verify(ubi, pnum, vid)) {
 			LOG_WRN("PEB %u: claims volume %u block %u but its data "
 				"was cut short; queued for reclaim",
 				pnum, vid->vol_id, vid->lnum);
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
+			ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
 			continue;
 		}
 
 		if (UBI_LEB_UNMAPPED != incumbent) {
-			struct ubi_headers other = { 0 };
-			uint64_t incumbent_sqnum = 0;
-
-			ret = ubi_headers_read(ubi, incumbent, &other);
-
-			/* A block that will not say how old it is loses to
-			 * one that will. */
-			if (0 == ret && UBI_HEADER_OK == other.vid_status)
-				incumbent_sqnum = other.vid.sqnum;
-
-			const uint32_t stale = (incumbent_sqnum > vid->sqnum) ?
-						       pnum :
-						       incumbent;
+			const uint32_t stale = device_leb_older(
+				ubi, incumbent, pnum, vid->sqnum);
 
 			LOG_WRN("volume %u block %u is claimed by PEB %u and "
 				"PEB %u; PEB %u is the older copy",
 				vid->vol_id, vid->lnum, incumbent, pnum, stale);
 
-			ubi_peb_state_set(ubi, stale, UBI_PEB_RECLAIM);
+			ubi_impl_peb_state_set(ubi, stale, UBI_PEB_RECLAIM);
 
 			if (stale == pnum)
 				continue;
 		}
 
-		ret = ubi_volume_leb_set(ubi, vid->vol_id, vid->lnum,
-					 (uint16_t)pnum);
+		ret = ubi_impl_volume_leb_set(ubi, vid->vol_id, vid->lnum,
+					      (uint16_t)pnum);
 
 		if (0 != ret) {
-			LOG_WRN("PEB %u: volume %u block %u went away between "
-				"the two lookups (%d)",
+			LOG_WRN("PEB %u: volume %u block %u would not take it "
+				"(%d); queued for reclaim",
 				pnum, vid->vol_id, vid->lnum, ret);
-			ubi_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
+			ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
 		}
 	}
 }
@@ -588,15 +758,13 @@ int ubi_impl_device_format(const struct ubi_config *config)
 	 * geometry and keys, so it borrows a handle without the per-block
 	 * bookkeeping, which it has no use for.
 	 */
-	struct ubi_device *ubi = k_malloc(sizeof(*ubi));
+	struct ubi_device *ubi = k_calloc(1, sizeof(*ubi));
 
 	if (NULL == ubi) {
 		LOG_ERR("no memory for a device handle of %zu bytes",
 			sizeof(*ubi));
 		return -ENOMEM;
 	}
-
-	memset(ubi, 0, sizeof(*ubi));
 
 	ret = device_open(ubi, config);
 
@@ -609,7 +777,7 @@ int ubi_impl_device_format(const struct ubi_config *config)
 		return ret;
 	}
 
-	ret = image_seq_draw(&ubi->image_seq);
+	ret = device_image_seq_draw(&ubi->image_seq);
 
 	if (0 != ret) {
 		LOG_ERR("cannot draw an image sequence number for partition %u",
@@ -628,7 +796,7 @@ int ubi_impl_device_format(const struct ubi_config *config)
 	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
 		struct ubi_headers headers = { 0 };
 
-		ret = ubi_headers_read(ubi, pnum, &headers);
+		ret = ubi_impl_header_read(ubi, pnum, &headers);
 
 		if (0 != ret)
 			continue;
@@ -654,11 +822,10 @@ int ubi_impl_device_format(const struct ubi_config *config)
 	 * only reason this walks the partition rather than taking the first
 	 * two blocks.
 	 */
-	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count; ++pnum) {
-		if (UBI_VOLUME_TABLE_LEB_COUNT == written)
-			break;
-
-		ret = ubi_peb_prepare(ubi, pnum);
+	for (uint32_t pnum = 0; pnum < ubi->geometry.peb_count &&
+				written < UBI_VOLUME_TABLE_LEB_COUNT;
+	     ++pnum) {
+		ret = ubi_impl_peb_prepare(ubi, pnum);
 
 		if (0 != ret) {
 			LOG_WRN("PEB %u cannot be prepared (%d), trying the "
@@ -669,7 +836,7 @@ int ubi_impl_device_format(const struct ubi_config *config)
 
 		ubi->volume_table.eba[written] = (uint16_t)pnum;
 
-		ret = ubi_volume_table_write(ubi, written, &record);
+		ret = ubi_impl_volume_table_write(ubi, written, &record);
 
 		if (0 != ret) {
 			LOG_WRN("PEB %u cannot hold a volume table copy (%d), "
@@ -736,7 +903,14 @@ int ubi_impl_device_init(struct ubi_device *ubi,
 
 	uint32_t unopenable = 0;
 
-	scan_first_pass(ubi, &unopenable);
+	device_scan_first_pass(ubi, &unopenable);
+
+	ret = device_corruption_check(ubi);
+
+	if (0 != ret) {
+		ubi_impl_device_deinit(ubi);
+		return ret;
+	}
 
 	/*
 	 * Oldest copy first, so that the record left in hand is the newest
@@ -763,11 +937,12 @@ int ubi_impl_device_init(struct ubi_device *ubi,
 
 		found += 1;
 
-		ret = ubi_volume_table_read(ubi, lnum, &record);
+		ret = ubi_impl_volume_table_read(ubi, lnum, &record);
 
 		if (0 != ret) {
-			ubi_event_emit(ubi, UBI_EVENT_VOLUME_TABLE_CORRUPT,
-				       pnum, UBI_VOLUME_TABLE_VOL_ID, lnum);
+			ubi_impl_event_emit(ubi, UBI_EVENT_VOLUME_TABLE_CORRUPT,
+					    pnum, UBI_VOLUME_TABLE_VOL_ID,
+					    lnum);
 			LOG_ERR("PEB %u holds volume table copy %u and it is "
 				"unusable (%d)",
 				pnum, lnum, ret);
@@ -801,14 +976,15 @@ int ubi_impl_device_init(struct ubi_device *ubi,
 		goto exit;
 	}
 
-	if (!volume_table_copies_agree(copy, ARRAY_SIZE(copy), &record)) {
+	if (!device_volume_table_copies_agree(copy, ARRAY_SIZE(copy),
+					      &record)) {
 		LOG_WRN("partition %u: not every copy of the volume table is "
 			"current, so one erase would cost a revision",
 			config->flash_area_id);
 		ubi->volume_table.degraded = true;
-		ubi_event_emit(ubi, UBI_EVENT_VOLUME_TABLE_DEGRADED,
-			       ubi->volume_table.eba[adopted],
-			       UBI_VOLUME_TABLE_VOL_ID, adopted);
+		ubi_impl_event_emit(ubi, UBI_EVENT_VOLUME_TABLE_DEGRADED,
+				    ubi->volume_table.eba[adopted],
+				    UBI_VOLUME_TABLE_VOL_ID, adopted);
 	}
 
 	if (record.peb_size != ubi->geometry.peb_size ||
@@ -826,7 +1002,7 @@ int ubi_impl_device_init(struct ubi_device *ubi,
 	ubi->volumes.revision = record.revision;
 	ubi->volume_table.current = adopted;
 
-	ret = ubi_volumes_build(ubi, &record);
+	ret = ubi_impl_volumes_build(ubi, &record);
 
 	if (0 != ret) {
 		LOG_ERR("the volume table declares more logical blocks than "
@@ -835,9 +1011,9 @@ int ubi_impl_device_init(struct ubi_device *ubi,
 		goto exit;
 	}
 
-	scan_second_pass(ubi);
+	device_scan_second_pass(ubi);
 
-	ret = ubi_state_check(ubi);
+	ret = ubi_impl_state_check(ubi);
 
 	if (0 != ret) {
 		LOG_ERR("partition %u: the state check refused this device",

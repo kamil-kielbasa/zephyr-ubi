@@ -79,36 +79,39 @@ BUILD_ASSERT(ENTRY_OFFSET_NAME + ENTRY_NAME_SIZE == UBI_VOLUME_TABLE_ENTRY_SIZE,
 /**
  * \brief Bytes a record with \p volume_count volumes occupies.
  */
-static size_t record_size_for(uint32_t volume_count);
+static size_t volume_table_record_size(uint32_t volume_count);
 
 /**
  * \brief Serialize and seal a record into \p buffer.
  */
-static int record_serialize(const struct ubi_volume_table_record *record,
-			    psa_key_id_t key_id, uint8_t *buffer,
-			    size_t buffer_size, size_t *record_size);
+static int
+volume_table_record_serialize(const struct ubi_volume_table_record *record,
+			      psa_key_id_t key_id, uint8_t *buffer,
+			      size_t buffer_size, size_t *record_size);
 
 /**
- * \brief Verify and decode a record, checking magic, then the tag, then the
+ * \brief Verify and decode a record, checking magic, then the MAC, then the
  *        entries, so that nothing read from the flash is used before it is
  *        authentic.
  */
 static enum ubi_header_status
-record_parse(const uint8_t *buffer, size_t buffer_size, psa_key_id_t key_id,
-	     struct ubi_volume_table_record *record);
+volume_table_record_parse(const uint8_t *buffer, size_t buffer_size,
+			  psa_key_id_t key_id,
+			  struct ubi_volume_table_record *record);
 
 /* Static function definitions --------------------------------------------- */
 
-static size_t record_size_for(uint32_t volume_count)
+static size_t volume_table_record_size(uint32_t volume_count)
 {
 	return UBI_VOLUME_TABLE_PREAMBLE_SIZE +
 	       (size_t)volume_count * UBI_VOLUME_TABLE_ENTRY_SIZE +
-	       UBI_HEADER_TAG_SIZE;
+	       UBI_MAC_SIZE;
 }
 
-static int record_serialize(const struct ubi_volume_table_record *record,
-			    psa_key_id_t key_id, uint8_t *buffer,
-			    size_t buffer_size, size_t *record_size)
+static int
+volume_table_record_serialize(const struct ubi_volume_table_record *record,
+			      psa_key_id_t key_id, uint8_t *buffer,
+			      size_t buffer_size, size_t *record_size)
 {
 	if (NULL == record || NULL == buffer || NULL == record_size ||
 	    PSA_KEY_ID_NULL == key_id)
@@ -117,14 +120,14 @@ static int record_serialize(const struct ubi_volume_table_record *record,
 	if (CONFIG_UBI_MAX_NR_OF_VOLUMES < record->volume_count)
 		return -EINVAL;
 
-	const size_t needed = record_size_for(record->volume_count);
+	const size_t needed = volume_table_record_size(record->volume_count);
 
 	if (buffer_size < needed)
 		return -EINVAL;
 
 	psa_status_t status = PSA_ERROR_GENERIC_ERROR;
-	size_t tag_offset = 0;
-	size_t tag_length = 0;
+	size_t mac_offset = 0;
+	size_t mac_length = 0;
 
 	memset(buffer, 0, needed);
 
@@ -153,13 +156,13 @@ static int record_serialize(const struct ubi_volume_table_record *record,
 			ENTRY_NAME_SIZE - 1);
 	}
 
-	tag_offset = needed - UBI_HEADER_TAG_SIZE;
+	mac_offset = needed - UBI_MAC_SIZE;
 
-	status = psa_mac_compute(key_id, PSA_ALG_CMAC, buffer, tag_offset,
-				 &buffer[tag_offset], UBI_HEADER_TAG_SIZE,
-				 &tag_length);
+	status = psa_mac_compute(key_id, PSA_ALG_CMAC, buffer, mac_offset,
+				 &buffer[mac_offset], UBI_MAC_SIZE,
+				 &mac_length);
 
-	if (PSA_SUCCESS != status || UBI_HEADER_TAG_SIZE != tag_length)
+	if (PSA_SUCCESS != status || UBI_MAC_SIZE != mac_length)
 		return -EIO;
 
 	*record_size = needed;
@@ -168,8 +171,9 @@ static int record_serialize(const struct ubi_volume_table_record *record,
 }
 
 static enum ubi_header_status
-record_parse(const uint8_t *buffer, size_t buffer_size, psa_key_id_t key_id,
-	     struct ubi_volume_table_record *record)
+volume_table_record_parse(const uint8_t *buffer, size_t buffer_size,
+			  psa_key_id_t key_id,
+			  struct ubi_volume_table_record *record)
 {
 	if (NULL == buffer || NULL == record || PSA_KEY_ID_NULL == key_id ||
 	    UBI_VOLUME_TABLE_PREAMBLE_SIZE > buffer_size)
@@ -177,7 +181,7 @@ record_parse(const uint8_t *buffer, size_t buffer_size, psa_key_id_t key_id,
 
 	psa_status_t status = PSA_ERROR_GENERIC_ERROR;
 	uint32_t volume_count = 0;
-	size_t tag_offset = 0;
+	size_t mac_offset = 0;
 	size_t needed = 0;
 
 	if (UBI_VOLUME_TABLE_MAGIC !=
@@ -195,16 +199,16 @@ record_parse(const uint8_t *buffer, size_t buffer_size, psa_key_id_t key_id,
 	if (CONFIG_UBI_MAX_NR_OF_VOLUMES < volume_count)
 		return UBI_HEADER_NOT_UBI;
 
-	needed = record_size_for(volume_count);
+	needed = volume_table_record_size(volume_count);
 
 	if (buffer_size < needed)
 		return UBI_HEADER_CORRUPT;
 
-	tag_offset = needed - UBI_HEADER_TAG_SIZE;
+	mac_offset = needed - UBI_MAC_SIZE;
 
-	/* Constant-time comparison; never memcmp() a tag. */
-	status = psa_mac_verify(key_id, PSA_ALG_CMAC, buffer, tag_offset,
-				&buffer[tag_offset], UBI_HEADER_TAG_SIZE);
+	/* Constant-time comparison; never memcmp() a MAC. */
+	status = psa_mac_verify(key_id, PSA_ALG_CMAC, buffer, mac_offset,
+				&buffer[mac_offset], UBI_MAC_SIZE);
 
 	if (PSA_ERROR_INVALID_SIGNATURE == status)
 		return UBI_HEADER_TAMPERED;
@@ -242,8 +246,8 @@ record_parse(const uint8_t *buffer, size_t buffer_size, psa_key_id_t key_id,
 	return UBI_HEADER_OK;
 }
 
-int ubi_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
-			  struct ubi_volume_table_record *record)
+int ubi_impl_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
+			       struct ubi_volume_table_record *record)
 {
 	if (NULL == ubi || NULL == record ||
 	    lnum >= UBI_VOLUME_TABLE_LEB_COUNT) {
@@ -258,8 +262,8 @@ int ubi_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
 
 	uint8_t buffer[VOLUME_TABLE_READ_SIZE] = { 0 };
 	const uint8_t *record_bytes = &buffer[UBI_HEADER_SIZE];
-	int ret = ubi_io_read(ubi, pnum, UBI_VID_HEADER_OFFSET, buffer,
-			      sizeof(buffer));
+	int ret = ubi_impl_io_read(ubi, pnum, UBI_VID_HEADER_OFFSET, buffer,
+				   sizeof(buffer));
 
 	if (0 != ret) {
 		LOG_ERR("PEB %u: volume table copy %u could not be read (%d)",
@@ -268,9 +272,9 @@ int ubi_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
 	}
 
 	struct ubi_vid_header vid = { 0 };
-	const enum ubi_header_status status =
-		ubi_vid_header_parse(buffer, UBI_HEADER_SIZE, ubi->keys.header,
-				     pnum, ubi->geometry.erase_value, &vid);
+	const enum ubi_header_status status = ubi_impl_header_vid_parse(
+		buffer, UBI_HEADER_SIZE, ubi->keys.header, pnum,
+		ubi->geometry.erase_value, &vid);
 
 	if (UBI_HEADER_OK != status)
 		return -ENOENT;
@@ -285,11 +289,11 @@ int ubi_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
 	    vid.data_crc != crc32_ieee(record_bytes, vid.data_size))
 		return -ENOENT;
 
-	const enum ubi_header_status record_status = record_parse(
+	const enum ubi_header_status record_status = volume_table_record_parse(
 		record_bytes, vid.data_size, ubi->keys.volume_table, record);
 
 	if (UBI_HEADER_TAMPERED == record_status) {
-		LOG_ERR("PEB %u: volume table copy %u carries a tag that does "
+		LOG_ERR("PEB %u: volume table copy %u carries a MAC that does "
 			"not match; it was modified",
 			pnum, lnum);
 		return -EBADMSG;
@@ -305,8 +309,8 @@ int ubi_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
 	return 0;
 }
 
-int ubi_volume_table_write(struct ubi_device *ubi, uint32_t lnum,
-			   const struct ubi_volume_table_record *record)
+int ubi_impl_volume_table_write(struct ubi_device *ubi, uint32_t lnum,
+				const struct ubi_volume_table_record *record)
 {
 	if (NULL == ubi || NULL == record ||
 	    lnum >= UBI_VOLUME_TABLE_LEB_COUNT) {
@@ -328,8 +332,9 @@ int ubi_volume_table_write(struct ubi_device *ubi, uint32_t lnum,
 	 * write block as if it had never been written; zeroes would burn it. */
 	memset(buffer, ubi->geometry.erase_value, sizeof(buffer));
 
-	int ret = record_serialize(record, ubi->keys.volume_table, buffer,
-				   sizeof(buffer), &record_size);
+	int ret = volume_table_record_serialize(record, ubi->keys.volume_table,
+						buffer, sizeof(buffer),
+						&record_size);
 
 	if (0 != ret) {
 		LOG_ERR("PEB %u: volume table copy %u could not be sealed (%d)",
@@ -349,14 +354,14 @@ int ubi_volume_table_write(struct ubi_device *ubi, uint32_t lnum,
 
 	/* The VID header goes down first and already carries the length and
 	 * the checksum, so an interrupted record is recognisable. */
-	ret = ubi_vid_header_write(ubi, pnum, &vid);
+	ret = ubi_impl_header_vid_write(ubi, pnum, &vid);
 
 	if (0 != ret)
 		return ret;
 
-	ret = ubi_io_write_data(ubi, pnum, 0, buffer,
-				ROUND_UP(record_size,
-					 ubi->geometry.write_block_size));
+	ret = ubi_impl_io_write_data(ubi, pnum, 0, buffer,
+				     ROUND_UP(record_size,
+					      ubi->geometry.write_block_size));
 
 	if (0 != ret) {
 		LOG_ERR("PEB %u: volume table copy %u could not be written "
@@ -371,8 +376,8 @@ int ubi_volume_table_write(struct ubi_device *ubi, uint32_t lnum,
 	return 0;
 }
 
-int ubi_volume_table_commit(struct ubi_device *ubi,
-			    const struct ubi_volume_table_record *record)
+int ubi_impl_volume_table_commit(struct ubi_device *ubi,
+				 const struct ubi_volume_table_record *record)
 {
 	if (NULL == ubi || NULL == record) {
 		LOG_ERR("committing the volume table got bad arguments");
@@ -389,12 +394,12 @@ int ubi_volume_table_commit(struct ubi_device *ubi,
 
 	for (uint32_t i = 0; i < UBI_VOLUME_TABLE_LEB_COUNT; ++i) {
 		const uint32_t lnum = order[i];
+		uint32_t pnum = ubi->volume_table.eba[lnum];
 		int ret = 0;
 
-		if (UBI_LEB_UNMAPPED == ubi->volume_table.eba[lnum]) {
-			uint32_t pnum = 0;
-
-			ret = ubi_peb_allocate(ubi, &pnum);
+		if (UBI_LEB_UNMAPPED == pnum) {
+			/* A free block arrives erased and stamped already. */
+			ret = ubi_impl_peb_allocate_for_write(ubi, &pnum);
 
 			if (0 != ret) {
 				LOG_ERR("no block to hold volume table copy "
@@ -404,20 +409,21 @@ int ubi_volume_table_commit(struct ubi_device *ubi,
 			}
 
 			ubi->volume_table.eba[lnum] = (uint16_t)pnum;
+		} else {
+			/* Reusing the block this copy already sits in, so the
+			 * old record has to go before the new one lands. */
+			ret = ubi_impl_peb_prepare(ubi, pnum);
+
+			if (0 != ret) {
+				LOG_ERR("PEB %u cannot take volume table copy "
+					"%u (%d)",
+					pnum, lnum, ret);
+				ubi->volume_table.eba[lnum] = UBI_LEB_UNMAPPED;
+				return ret;
+			}
 		}
 
-		const uint32_t pnum = ubi->volume_table.eba[lnum];
-
-		ret = ubi_peb_prepare(ubi, pnum);
-
-		if (0 != ret) {
-			LOG_ERR("PEB %u cannot take volume table copy %u (%d)",
-				pnum, lnum, ret);
-			ubi->volume_table.eba[lnum] = UBI_LEB_UNMAPPED;
-			return ret;
-		}
-
-		ret = ubi_volume_table_write(ubi, lnum, record);
+		ret = ubi_impl_volume_table_write(ubi, lnum, record);
 
 		if (0 != ret) {
 			LOG_ERR("PEB %u cannot hold volume table copy %u (%d)",
@@ -426,7 +432,7 @@ int ubi_volume_table_commit(struct ubi_device *ubi,
 			return ret;
 		}
 
-		ubi_peb_state_set(ubi, pnum, UBI_PEB_MAPPED);
+		ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_MAPPED);
 
 		/* The freshly written copy is the one in force from here on,
 		 * so an interruption of the second write loses nothing. */

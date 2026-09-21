@@ -5,34 +5,26 @@
  *
  *          Every physical erase block opens with two 64-byte headers: the
  *          erase counter (EC) header at offset zero and the volume identifier
- *          (VID) header right behind it, so that a single 128-byte read pulls
- *          both during attach.
+ *          (VID) header right behind it, so that one 128-byte read pulls both.
  *
- *          Both carry a CRC32 and an AES-CMAC tag, and they answer different
- *          questions. The CRC tells an interrupted write apart from a
- *          deliberate change: a bad CRC is damage, whereas a good CRC over a
- *          bad tag means someone edited a field and recomputed the checksum.
- *          Only the tag decides authenticity.
+ *          Both carry a CRC32 and an AES-CMAC. The CRC tells an interrupted
+ *          write apart from a deliberate change; only the MAC decides
+ *          authenticity.
  *
- *          The tag covers the physical block number followed by every field
- *          except the tag and the CRC. Binding the block number is what stops
- *          a header from being copied elsewhere: the bytes stay valid but no
- *          longer verify where they were moved to. The magic is inside that
- *          same input, so an EC tag can never pass for a VID one.
+ *          The MAC covers the physical block number followed by every field
+ *          except the MAC and the CRC, which is what stops a header from
+ *          being copied to another block. The magic is inside that input, so
+ *          an EC MAC can never pass for a VID one.
  *
- *          Two things are deliberately not bound. The absolute flash offset
- *          adds nothing over the block number, because the header offsets are
- *          fixed and the block size is recorded in the authenticated volume
- *          table. The EC tag is not folded into the VID input either: it would
- *          close the substitution of an older but still authentic EC header,
- *          at the price of an extra read on the write path or two kilobytes of
- *          cached tags, and the only thing that attack buys is a skewed erase
- *          count. DESIGN.md §2.1 carries the full trade.
+ *          The erase counter header stays byte-compatible with Linux UBI:
+ *          its MAC sits in \c padding2. The volume identifier header does
+ *          not, because Linux leaves no 16-byte hole in it. There the MAC
+ *          takes the space of \c used_ebs, \c data_pad and \c data_crc,
+ *          none of which a dynamic-only implementation has any use for, and
+ *          this implementation's own data checksum moves to \c padding3.
  *
- *          Neither is a build option, and cannot be: changing what goes into
- *          the authenticated input changes the on-flash format, so two builds
- *          would produce headers that reject one another. Such a change
- *          travels as a bump of #UBI_HEADER_VERSION.
+ *          Changing what goes into that input changes the on-flash format,
+ *          so such a change travels as a bump of #UBI_HEADER_VERSION.
  *
  * \copyright Copyright (c) 2026
  *
@@ -67,20 +59,10 @@
 #define UBI_DATA_OFFSET (128)
 
 /**
- * Length of the AES-CMAC tag embedded in each header.
- *
- * Written out rather than derived from PSA on purpose: this is an on-flash
- * dimension, so it must stay put even if the algorithm were ever revisited.
- * ubi_header.c asserts at build time that AES-CMAC really does produce this
- * many bytes.
- */
-#define UBI_HEADER_TAG_SIZE (16)
-
-/**
  * Header format understood by this implementation.
  *
- * Bump this for any change to the field layout or to what the tag covers.
- * The version byte is checked after the tag verifies, so an image written by
+ * Bump this for any change to the field layout or to what the MAC covers.
+ * The version byte is checked after the MAC verifies, so an image written by
  * a different format reports #UBI_HEADER_NOT_UBI rather than looking like
  * tampering.
  */
@@ -92,7 +74,7 @@
  * \brief Verdict of parsing a header off the flash.
  */
 enum ubi_header_status {
-	/** Magic, CRC and tag all check out; the fields are trustworthy. */
+	/** Magic, CRC and MAC all check out; the fields are trustworthy. */
 	UBI_HEADER_OK = 0,
 	/** Every byte reads as the flash's erased value; the block carries no
 	 *  header. */
@@ -102,7 +84,7 @@ enum ubi_header_status {
 	UBI_HEADER_NOT_UBI,
 	/** CRC mismatch: an interrupted write or bit rot. */
 	UBI_HEADER_CORRUPT,
-	/** CRC matches but the tag does not: the header was modified. */
+	/** CRC matches but the MAC does not: the header was modified. */
 	UBI_HEADER_TAMPERED,
 	/** The crypto backend failed; the header says nothing either way. */
 	UBI_HEADER_ERROR,
@@ -111,9 +93,9 @@ enum ubi_header_status {
 /**
  * \brief Erase counter header, in decoded form.
  *
- *        The CRC and the tag are deliberately absent. They are how the bytes
+ *        The CRC and the MAC are deliberately absent. They are how the bytes
  *        are checked, not information the caller acts on, and exposing the
- *        tag would invite someone to compare it by hand.
+ *        MAC would invite someone to compare it by hand.
  */
 struct ubi_ec_header {
 	/** Times this physical block has been erased. */
@@ -175,13 +157,13 @@ struct ubi_device;
 /**
  * \brief Serialize and seal an erase counter header.
  *
- *        Lays the fields out big-endian, computes the tag over \p pnum and
- *        the fields, then computes the CRC over everything including the tag.
+ *        Lays the fields out big-endian, computes the MAC over \p pnum and
+ *        the fields, then computes the CRC over everything including the MAC.
  *
  * \param[in] header                    Fields to encode.
  * \param key_id                        CMAC key.
  * \param pnum                          Physical block the header will live
- *                                      in; bound into the tag.
+ *                                      in; bound into the MAC.
  * \param[out] buffer                   Receives #UBI_HEADER_SIZE bytes.
  * \param buffer_size                   Bytes available at \p buffer.
  *
@@ -193,16 +175,16 @@ struct ubi_device;
  * \retval -EIO
  *         The crypto backend failed.
  */
-int ubi_ec_header_serialize(const struct ubi_ec_header *header,
-			    psa_key_id_t key_id, uint32_t pnum, uint8_t *buffer,
-			    size_t buffer_size);
+int ubi_impl_header_ec_serialize(const struct ubi_ec_header *header,
+				 psa_key_id_t key_id, uint32_t pnum,
+				 uint8_t *buffer, size_t buffer_size);
 
 /**
  * \brief Verify and decode an erase counter header.
  *
- *        Checks magic, then CRC, then tag, and only then touches the fields.
- *        Nothing read from the flash is used before the tag verifies, so a
- *        forged header cannot steer where UBI reads next. Once the tag
+ *        Checks magic, then CRC, then MAC, and only then touches the fields.
+ *        Nothing read from the flash is used before the MAC verifies, so a
+ *        forged header cannot steer where UBI reads next. Once the MAC
  *        verifies, the recorded block layout is checked against the one this
  *        build uses; an authentic header describing a different layout is
  *        reported as #UBI_HEADER_NOT_UBI.
@@ -218,11 +200,10 @@ int ubi_ec_header_serialize(const struct ubi_ec_header *header,
  *
  * \return Verdict of the checks.
  */
-enum ubi_header_status ubi_ec_header_parse(const uint8_t *buffer,
-					   size_t buffer_size,
-					   psa_key_id_t key_id, uint32_t pnum,
-					   uint8_t erase_value,
-					   struct ubi_ec_header *header);
+enum ubi_header_status
+ubi_impl_header_ec_parse(const uint8_t *buffer, size_t buffer_size,
+			 psa_key_id_t key_id, uint32_t pnum,
+			 uint8_t erase_value, struct ubi_ec_header *header);
 
 /**
  * \brief Serialize and seal a volume identifier header.
@@ -230,7 +211,7 @@ enum ubi_header_status ubi_ec_header_parse(const uint8_t *buffer,
  * \param[in] header                    Fields to encode.
  * \param key_id                        CMAC key.
  * \param pnum                          Physical block the header will live
- *                                      in; bound into the tag.
+ *                                      in; bound into the MAC.
  * \param[out] buffer                   Receives #UBI_HEADER_SIZE bytes.
  * \param buffer_size                   Bytes available at \p buffer.
  *
@@ -242,9 +223,9 @@ enum ubi_header_status ubi_ec_header_parse(const uint8_t *buffer,
  * \retval -EIO
  *         The crypto backend failed.
  */
-int ubi_vid_header_serialize(const struct ubi_vid_header *header,
-			     psa_key_id_t key_id, uint32_t pnum,
-			     uint8_t *buffer, size_t buffer_size);
+int ubi_impl_header_vid_serialize(const struct ubi_vid_header *header,
+				  psa_key_id_t key_id, uint32_t pnum,
+				  uint8_t *buffer, size_t buffer_size);
 
 /**
  * \brief Verify and decode a volume identifier header.
@@ -260,11 +241,10 @@ int ubi_vid_header_serialize(const struct ubi_vid_header *header,
  *
  * \return Verdict of the checks.
  */
-enum ubi_header_status ubi_vid_header_parse(const uint8_t *buffer,
-					    size_t buffer_size,
-					    psa_key_id_t key_id, uint32_t pnum,
-					    uint8_t erase_value,
-					    struct ubi_vid_header *header);
+enum ubi_header_status
+ubi_impl_header_vid_parse(const uint8_t *buffer, size_t buffer_size,
+			  psa_key_id_t key_id, uint32_t pnum,
+			  uint8_t erase_value, struct ubi_vid_header *header);
 
 /**
  * \brief Read and verify both headers of a physical erase block.
@@ -284,8 +264,8 @@ enum ubi_header_status ubi_vid_header_parse(const uint8_t *buffer,
  * \retval -EIO
  *         The flash driver failed.
  */
-int ubi_headers_read(const struct ubi_device *ubi, uint32_t pnum,
-		     struct ubi_headers *headers);
+int ubi_impl_header_read(const struct ubi_device *ubi, uint32_t pnum,
+			 struct ubi_headers *headers);
 
 /**
  * \brief Seal an erase counter header and write it to a block.
@@ -304,8 +284,8 @@ int ubi_headers_read(const struct ubi_device *ubi, uint32_t pnum,
  * \retval -EIO
  *         The crypto backend or the flash driver failed.
  */
-int ubi_ec_header_write(struct ubi_device *ubi, uint32_t pnum,
-			const struct ubi_ec_header *header);
+int ubi_impl_header_ec_write(struct ubi_device *ubi, uint32_t pnum,
+			     const struct ubi_ec_header *header);
 
 /**
  * \brief Seal a volume identifier header and write it to a block.
@@ -324,8 +304,8 @@ int ubi_ec_header_write(struct ubi_device *ubi, uint32_t pnum,
  * \retval -EIO
  *         The crypto backend or the flash driver failed.
  */
-int ubi_vid_header_write(struct ubi_device *ubi, uint32_t pnum,
-			 const struct ubi_vid_header *header);
+int ubi_impl_header_vid_write(struct ubi_device *ubi, uint32_t pnum,
+			      const struct ubi_vid_header *header);
 
 /**
  * \brief Check a block's data area against what its VID header promises.
@@ -346,7 +326,7 @@ int ubi_vid_header_write(struct ubi_device *ubi, uint32_t pnum,
  * \retval -EIO
  *         The flash driver failed.
  */
-int ubi_vid_header_data_verify(const struct ubi_device *ubi, uint32_t pnum,
-			       const struct ubi_vid_header *header);
+int ubi_impl_header_vid_data_verify(const struct ubi_device *ubi, uint32_t pnum,
+				    const struct ubi_vid_header *header);
 
 #endif /* UBI_HEADER_H */

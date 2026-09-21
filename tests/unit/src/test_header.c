@@ -42,11 +42,12 @@ ZTEST(ubi_unit, test_ec_header_roundtrip)
 	struct ubi_ec_header read = { 0 };
 	uint8_t buffer[UBI_HEADER_SIZE] = { 0 };
 
-	zassert_ok(ubi_ec_header_serialize(&written, key_header, TEST_PNUM,
-					   buffer, sizeof(buffer)));
+	zassert_ok(ubi_impl_header_ec_serialize(&written, key_header, TEST_PNUM,
+						buffer, sizeof(buffer)));
 	zassert_equal(UBI_HEADER_OK,
-		      ubi_ec_header_parse(buffer, sizeof(buffer), key_header,
-					  TEST_PNUM, TEST_ERASE_VALUE, &read));
+		      ubi_impl_header_ec_parse(buffer, sizeof(buffer),
+					       key_header, TEST_PNUM,
+					       TEST_ERASE_VALUE, &read));
 
 	zassert_equal(written.erase_count, read.erase_count);
 	zassert_equal(written.image_seq, read.image_seq);
@@ -68,11 +69,12 @@ ZTEST(ubi_unit, test_vid_header_roundtrip)
 	struct ubi_vid_header read = { 0 };
 	uint8_t buffer[UBI_HEADER_SIZE] = { 0 };
 
-	zassert_ok(ubi_vid_header_serialize(&written, key_header, TEST_PNUM,
-					    buffer, sizeof(buffer)));
+	zassert_ok(ubi_impl_header_vid_serialize(
+		&written, key_header, TEST_PNUM, buffer, sizeof(buffer)));
 	zassert_equal(UBI_HEADER_OK,
-		      ubi_vid_header_parse(buffer, sizeof(buffer), key_header,
-					   TEST_PNUM, TEST_ERASE_VALUE, &read));
+		      ubi_impl_header_vid_parse(buffer, sizeof(buffer),
+						key_header, TEST_PNUM,
+						TEST_ERASE_VALUE, &read));
 
 	zassert_equal(written.sqnum, read.sqnum);
 	zassert_equal(written.vol_id, read.vol_id);
@@ -86,13 +88,13 @@ ZTEST(ubi_unit, test_vid_header_roundtrip)
 ZTEST(ubi_unit, test_erased_block_has_no_header)
 {
 	zassert_equal(UBI_HEADER_ERASED,
-		      ubi_ec_header_parse(erased_block, sizeof(erased_block),
-					  key_header, TEST_PNUM,
-					  TEST_ERASE_VALUE, NULL));
+		      ubi_impl_header_ec_parse(
+			      erased_block, sizeof(erased_block), key_header,
+			      TEST_PNUM, TEST_ERASE_VALUE, NULL));
 	zassert_equal(UBI_HEADER_ERASED,
-		      ubi_vid_header_parse(erased_block, sizeof(erased_block),
-					   key_header, TEST_PNUM,
-					   TEST_ERASE_VALUE, NULL));
+		      ubi_impl_header_vid_parse(
+			      erased_block, sizeof(erased_block), key_header,
+			      TEST_PNUM, TEST_ERASE_VALUE, NULL));
 }
 
 ZTEST(ubi_unit, test_blankness_follows_the_flash_erase_value)
@@ -102,12 +104,13 @@ ZTEST(ubi_unit, test_blankness_follows_the_flash_erase_value)
 	/* A flash that erases to zero must not be told that its blank blocks
 	 * hold something, nor that a block of 0xFF is blank. */
 	zassert_equal(UBI_HEADER_ERASED,
-		      ubi_ec_header_parse(zeroed_block, sizeof(zeroed_block),
-					  key_header, TEST_PNUM, 0x00, NULL));
-	zassert_not_equal(UBI_HEADER_ERASED,
-			  ubi_ec_header_parse(erased_block,
-					      sizeof(erased_block), key_header,
-					      TEST_PNUM, 0x00, NULL));
+		      ubi_impl_header_ec_parse(zeroed_block,
+					       sizeof(zeroed_block), key_header,
+					       TEST_PNUM, 0x00, NULL));
+	zassert_not_equal(
+		UBI_HEADER_ERASED,
+		ubi_impl_header_ec_parse(erased_block, sizeof(erased_block),
+					 key_header, TEST_PNUM, 0x00, NULL));
 }
 
 /* Tests: the on-flash layout is a contract -------------------------------- */
@@ -122,8 +125,8 @@ ZTEST(ubi_unit, test_ec_layout_is_pinned)
 	};
 	uint8_t buffer[UBI_HEADER_SIZE] = { 0 };
 
-	zassert_ok(ubi_ec_header_serialize(&header, key_header, TEST_PNUM,
-					   buffer, sizeof(buffer)));
+	zassert_ok(ubi_impl_header_ec_serialize(&header, key_header, TEST_PNUM,
+						buffer, sizeof(buffer)));
 
 	/* Every field Linux UBI interprets sits where Linux puts it. */
 	zassert_equal(0x55424923UL, sys_get_be32(&buffer[0x00]), "magic");
@@ -148,8 +151,8 @@ ZTEST(ubi_unit, test_vid_layout_is_pinned)
 	};
 	uint8_t buffer[UBI_HEADER_SIZE] = { 0 };
 
-	zassert_ok(ubi_vid_header_serialize(&header, key_header, TEST_PNUM,
-					    buffer, sizeof(buffer)));
+	zassert_ok(ubi_impl_header_vid_serialize(&header, key_header, TEST_PNUM,
+						 buffer, sizeof(buffer)));
 
 	zassert_equal(0x55424921UL, sys_get_be32(&buffer[0x00]), "magic");
 	zassert_equal(1, buffer[0x04], "version");
@@ -175,11 +178,12 @@ ZTEST(ubi_unit, test_authentic_header_with_foreign_layout_is_refused)
 	};
 	uint8_t buffer[UBI_HEADER_SIZE] = { 0 };
 
-	zassert_ok(ubi_ec_header_serialize(&header, key_header, TEST_PNUM,
-					   buffer, sizeof(buffer)));
+	zassert_ok(ubi_impl_header_ec_serialize(&header, key_header, TEST_PNUM,
+						buffer, sizeof(buffer)));
 
-	/* The tag verifies, but this build cannot address that layout. */
+	/* The MAC verifies, but this build cannot address that layout. */
 	zassert_equal(UBI_HEADER_NOT_UBI,
-		      ubi_ec_header_parse(buffer, sizeof(buffer), key_header,
-					  TEST_PNUM, TEST_ERASE_VALUE, NULL));
+		      ubi_impl_header_ec_parse(buffer, sizeof(buffer),
+					       key_header, TEST_PNUM,
+					       TEST_ERASE_VALUE, NULL));
 }

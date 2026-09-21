@@ -17,3 +17,7 @@ target_sources(app PRIVATE
   src/test_trust.c
   src/test_volume.c
 )
+
+# Stamping a block with a chosen erase counter needs the library's own header
+# format and key derivation. No test hooks are added to the library itself.
+target_include_directories(app PRIVATE ${ZEPHYR_UBI_MODULE_DIR}/library)

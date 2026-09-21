@@ -46,8 +46,8 @@ static off_t io_offset(const struct ubi_device *ubi, uint32_t pnum,
 
 /* Module interface function definitions ----------------------------------- */
 
-int ubi_io_read(const struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
-		uint8_t *buffer, size_t length)
+int ubi_impl_io_read(const struct ubi_device *ubi, uint32_t pnum,
+		     uint32_t offset, uint8_t *buffer, size_t length)
 {
 	if (NULL == ubi || NULL == ubi->flash_area || NULL == buffer ||
 	    0 == length) {
@@ -79,8 +79,8 @@ int ubi_io_read(const struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
 	return 0;
 }
 
-int ubi_io_write(struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
-		 const uint8_t *buffer, size_t length)
+int ubi_impl_io_write(struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
+		      const uint8_t *buffer, size_t length)
 {
 	if (NULL == ubi || NULL == ubi->flash_area || NULL == buffer ||
 	    0 == length) {
@@ -114,7 +114,7 @@ int ubi_io_write(struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
 	return 0;
 }
 
-int ubi_io_erase(const struct ubi_device *ubi, uint32_t pnum)
+int ubi_impl_io_erase(const struct ubi_device *ubi, uint32_t pnum)
 {
 	if (NULL == ubi || NULL == ubi->flash_area) {
 		LOG_ERR("PEB %u: an erase needs an open partition", pnum);

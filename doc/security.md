@@ -18,19 +18,19 @@ domain, and availability. Anyone who can write the flash can always erase it.
 
 | # | attack | caught by | how |
 |---|---|---|---|
-| 1 | a byte changed in either header | UBI | the header tag |
+| 1 | a byte changed in either header | UBI | the header MAC |
 | 2 | a byte changed in your data | you | your own AEAD |
-| 3 | a whole block copied elsewhere | UBI | `pnum` inside the tag's message |
+| 3 | a whole block copied elsewhere | UBI | `pnum` inside the MAC's message |
 | 4 | data moved between logical blocks | you | `vol_id` and `lnum` in your AAD |
 | 5 | a block from another image inserted | UBI | `image_seq`, authenticated |
 | 6 | the whole flash image rolled back | your application | the state callback sees `revision` or `global_sqnum` go backwards |
-| 7 | the volume table replaced | UBI | the record tag |
+| 7 | the volume table replaced | UBI | the record MAC |
 | 8 | a block erased | you | the logical block reads back empty |
 | 9 | **one block restored to an older authentic version, same `pnum`** | **nobody** | see below |
 
 ## The boundary
 
-Row 9 is where this stops. Every tag still verifies, because it verified once;
+Row 9 is where this stops. Every MAC still verifies, because it verified once;
 `pnum` matches; `image_seq` matches; and the global maximum sequence number
 does not move, because other blocks hold it.
 
@@ -70,7 +70,7 @@ raw flash access reads volume names, sizes, erase counts and block contents.
 
 **It hands you nothing to bind your ciphertext to.** That was considered and
 rejected. Binding to a physical position breaks legitimate relocation and adds
-no detection, because the position is already covered by the header tag.
+no detection, because the position is already covered by the header MAC.
 Binding to logical identity is redundant: you passed `vol_id` and `lnum` in
 yourself. Encryption callbacks would need a staging buffer inside UBI and have
 a tangled contract with a caller's AEAD.
@@ -87,11 +87,11 @@ authentication subkey and breaks authentication outright.
 
 ## Damage versus tampering
 
-Headers carry both a CRC and a tag, and the CRC is computed last, over the tag.
+Headers carry both a CRC and a MAC, and the CRC is computed last, over the MAC.
 So the two are distinguishable, and reported separately:
 
 - `UBI_EVENT_HDR_CORRUPT` — the CRC failed. An interrupted write or bit rot.
-- `UBI_EVENT_HDR_TAMPERED` — the CRC passed and the tag did not. Someone
+- `UBI_EVENT_HDR_TAMPERED` — the CRC passed and the MAC did not. Someone
   changed a field and recomputed the checksum.
 
 The volume table record gets no such split, and that is deliberate. Its CRC
@@ -99,3 +99,17 @@ lives in the sealed header in front of it, so anyone able to repair that
 checksum already holds the key. A damaged record and a forged one are
 indistinguishable from outside, and one event says so:
 `UBI_EVENT_VOLUME_TABLE_CORRUPT`.
+
+## Damaged blocks are kept, not erased
+
+A block whose erase counter header verifies but whose volume identifier header
+does not is preserved rather than reclaimed, unless its data area is blank —
+which means the write was simply cut short. Anything else stays where it is,
+counted in `corrupt_pebs` and never allocated, erased or relocated.
+
+Reclaiming such a block would destroy the only copy of whatever it holds moments
+after the event reporting it was raised, leaving nothing to look at afterwards.
+Attach refuses outright once more than a twentieth of the partition is in that
+state, on the grounds that a partition that damaged is probably not the
+partition it appears to be. Linux UBI does both, for the same reasons.
+

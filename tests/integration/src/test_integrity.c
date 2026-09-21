@@ -49,7 +49,7 @@ ZTEST(ubi_integration, test_one_damaged_volume_table_copy_is_survived)
 	zassert_true(event_seen[UBI_EVENT_VOLUME_TABLE_DEGRADED]);
 
 	/* The record carries a CRC in its sealed header, so a changed byte is
-	 * caught before the tag is ever checked. Which of the two it was
+	 * caught before the MAC is ever checked. Which of the two it was
 	 * cannot be told from out here, and the report does not pretend. */
 	zassert_equal(1, event_seen[UBI_EVENT_VOLUME_TABLE_CORRUPT]);
 	zassert_true(event_last[UBI_EVENT_VOLUME_TABLE_CORRUPT].pnum <
@@ -145,6 +145,44 @@ ZTEST(ubi_integration, test_a_damaged_erase_counter_header_is_reported)
 
 	zassert_ok(ubi_device_get_info(ubi, &info));
 	zassert_equal(1, info.healthy_pebs, "the damaged block is not counted");
+
+	zassert_ok(ubi_device_deinit(ubi));
+}
+
+ZTEST(ubi_integration, test_a_damaged_block_that_still_holds_data_is_kept)
+{
+	const struct ubi_volume_config wanted = { .name = "logs",
+						  .leb_count = 4 };
+	struct ubi_device_info info = { 0 };
+	struct ubi_maintenance_result result = { 0 };
+	uint32_t vol_id = UBI_VOL_ID_INVALID;
+	uint8_t written[64];
+
+	memset(written, 0xD7, sizeof(written));
+
+	zassert_ok(ubi_device_format(&config));
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_ok(ubi_volume_create(ubi, &wanted, &vol_id));
+	zassert_ok(ubi_leb_change(ubi, vol_id, 0, written, sizeof(written)));
+	zassert_ok(ubi_device_deinit(ubi));
+
+	zassert_equal(1, corrupt_header_of_data_matching(written,
+							 sizeof(written)));
+
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_ok(ubi_device_get_info(ubi, &info));
+
+	zassert_equal(1, info.corrupt_pebs,
+		      "a block whose data survived its header is preserved");
+
+	/* Neither pass may take it away: erasing it would destroy the only
+	 * copy of data the application may still want to salvage. */
+	zassert_ok(ubi_maintenance(ubi, UBI_MAINTENANCE_RECLAIM, 16, &result));
+	zassert_ok(ubi_maintenance(ubi, UBI_MAINTENANCE_REPAIR, 16, &result));
+	zassert_ok(ubi_device_get_info(ubi, &info));
+
+	zassert_equal(1, info.corrupt_pebs,
+		      "maintenance must not erase what it cannot read");
 
 	zassert_ok(ubi_device_deinit(ubi));
 }

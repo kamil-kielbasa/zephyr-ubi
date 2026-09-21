@@ -21,6 +21,9 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/storage/flash_map.h>
 
+/* PSA headers: */
+#include <psa/crypto.h>
+
 /* UBI headers: */
 #include <ubi/ubi.h>
 
@@ -45,6 +48,21 @@
  * \brief Overwrite the whole partition with one byte value.
  */
 void partition_fill(uint8_t value);
+
+/**
+ * \brief Erase a block and stamp it with an erase counter header of your own.
+ *
+ *        The header is sealed with the key the library would derive, so it
+ *        verifies; only the count in it is a value the library would never
+ *        write.
+ *
+ * \param ikm_key_id                   Keying material the device attaches with.
+ * \param pnum                         Block to restamp.
+ * \param image_seq                    Image the block should claim.
+ * \param erase_count                  Count to write into the header.
+ */
+void stamp_erase_count(psa_key_id_t ikm_key_id, uint32_t pnum,
+		       uint32_t image_seq, uint64_t erase_count);
 
 /**
  * \brief Clear the lowest set bit of one byte on the flash.

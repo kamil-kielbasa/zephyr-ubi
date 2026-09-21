@@ -61,15 +61,15 @@ psa_key_id_t import_ikm(const uint8_t *ikm, size_t length,
 			psa_key_usage_t usage);
 
 /**
- * \brief Fingerprint a derived key by tagging a fixed message with it.
+ * \brief Fingerprint a derived key by authenticating a fixed message with it.
  *
  *        Derived keys are not exportable, so this is how two of them are
  *        compared for equality.
  */
-void key_fingerprint(psa_key_id_t key_id, uint8_t *tag, size_t tag_size);
+void key_fingerprint(psa_key_id_t key_id, uint8_t *MAC, size_t mac_size);
 
 /**
- * \brief Recompute the CRC so that only the tag can flag a change.
+ * \brief Recompute the CRC so that only the MAC can flag a change.
  */
 void fix_crc(uint8_t *buffer);
 

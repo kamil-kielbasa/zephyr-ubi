@@ -52,8 +52,8 @@ static uint16_t *volumes_eba_end(const struct ubi_device *ubi);
 /**
  * \brief Write the volumes as they stand into a record, one revision on.
  */
-static void record_from_volumes(const struct ubi_device *ubi,
-				struct ubi_volume_table_record *record);
+static void volumes_to_record(const struct ubi_device *ubi,
+			      struct ubi_volume_table_record *record);
 
 /**
  * \brief Adopt a record that is now on the flash, keeping the mappings the
@@ -101,8 +101,8 @@ static uint16_t *volumes_eba_end(const struct ubi_device *ubi)
 	return ubi->volumes.eba_pool + ubi->volumes.eba_used;
 }
 
-static void record_from_volumes(const struct ubi_device *ubi,
-				struct ubi_volume_table_record *record)
+static void volumes_to_record(const struct ubi_device *ubi,
+			      struct ubi_volume_table_record *record)
 {
 	memset(record, 0, sizeof(*record));
 
@@ -218,18 +218,18 @@ static int volume_name_validate(const struct ubi_device *ubi, const char *name)
 
 /* Module interface function definitions ----------------------------------- */
 
-uint32_t ubi_volumes_leb_free(const struct ubi_device *ubi)
+uint32_t ubi_impl_volumes_leb_free(const struct ubi_device *ubi)
 {
 	return volumes_leb_budget(ubi) - ubi->volumes.eba_used;
 }
 
-int ubi_volumes_rewrite(struct ubi_device *ubi)
+int ubi_impl_volumes_rewrite(struct ubi_device *ubi)
 {
 	struct ubi_volume_table_record record = { 0 };
 
-	record_from_volumes(ubi, &record);
+	volumes_to_record(ubi, &record);
 
-	const int ret = ubi_volume_table_commit(ubi, &record);
+	const int ret = ubi_impl_volume_table_commit(ubi, &record);
 
 	if (0 != ret) {
 		LOG_ERR("the volume table could not be rewritten (%d)", ret);
@@ -241,7 +241,8 @@ int ubi_volumes_rewrite(struct ubi_device *ubi)
 	return 0;
 }
 
-struct ubi_volume *ubi_volume_by_id(struct ubi_device *ubi, uint32_t vol_id)
+struct ubi_volume *ubi_impl_volume_by_id(struct ubi_device *ubi,
+					 uint32_t vol_id)
 {
 	if (UBI_VOLUME_TABLE_VOL_ID == vol_id)
 		return &ubi->volume_table.volume;
@@ -254,8 +255,8 @@ struct ubi_volume *ubi_volume_by_id(struct ubi_device *ubi, uint32_t vol_id)
 	return NULL;
 }
 
-int ubi_volumes_build(struct ubi_device *ubi,
-		      const struct ubi_volume_table_record *record)
+int ubi_impl_volumes_build(struct ubi_device *ubi,
+			   const struct ubi_volume_table_record *record)
 {
 	ubi->volumes.count = record->volume_count;
 	ubi->volumes.id_watermark = record->vol_id_watermark;
@@ -282,32 +283,42 @@ int ubi_volumes_build(struct ubi_device *ubi,
 	return 0;
 }
 
-int ubi_volume_leb_get(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
-		       uint16_t *pnum)
+int ubi_impl_volume_leb_get(struct ubi_device *ubi, uint32_t vol_id,
+			    uint32_t lnum, uint16_t *pnum)
 {
-	const struct ubi_volume *volume = ubi_volume_by_id(ubi, vol_id);
+	const struct ubi_volume *volume = ubi_impl_volume_by_id(ubi, vol_id);
 
-	if (NULL == volume)
+	if (NULL == volume) {
+		LOG_ERR("there is no volume %u", vol_id);
 		return -ENOENT;
+	}
 
-	if (lnum >= volume->leb_count)
+	if (lnum >= volume->leb_count) {
+		LOG_ERR("volume %u holds %u blocks, so there is no block %u",
+			vol_id, volume->leb_count, lnum);
 		return -EINVAL;
+	}
 
 	*pnum = volume->eba[lnum];
 
 	return 0;
 }
 
-int ubi_volume_leb_set(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
-		       uint16_t pnum)
+int ubi_impl_volume_leb_set(struct ubi_device *ubi, uint32_t vol_id,
+			    uint32_t lnum, uint16_t pnum)
 {
-	struct ubi_volume *volume = ubi_volume_by_id(ubi, vol_id);
+	struct ubi_volume *volume = ubi_impl_volume_by_id(ubi, vol_id);
 
-	if (NULL == volume)
+	if (NULL == volume) {
+		LOG_ERR("there is no volume %u", vol_id);
 		return -ENOENT;
+	}
 
-	if (lnum >= volume->leb_count)
+	if (lnum >= volume->leb_count) {
+		LOG_ERR("volume %u holds %u blocks, so there is no block %u",
+			vol_id, volume->leb_count, lnum);
 		return -EINVAL;
+	}
 
 	volume->eba[lnum] = pnum;
 
@@ -353,7 +364,7 @@ int ubi_impl_volume_create(struct ubi_device *ubi,
 	struct ubi_volume_table_record record = { 0 };
 	struct ubi_volume_table_entry *entry = NULL;
 
-	record_from_volumes(ubi, &record);
+	volumes_to_record(ubi, &record);
 
 	entry = &record.entries[record.volume_count];
 	entry->vol_id = ubi->volumes.id_watermark;
@@ -363,7 +374,7 @@ int ubi_impl_volume_create(struct ubi_device *ubi,
 	record.volume_count += 1;
 	record.vol_id_watermark = entry->vol_id + 1;
 
-	ret = ubi_volume_table_commit(ubi, &record);
+	ret = ubi_impl_volume_table_commit(ubi, &record);
 
 	if (0 != ret) {
 		LOG_ERR("\"%s\" could not be written to the volume table (%d)",
@@ -406,7 +417,7 @@ int ubi_impl_volume_remove(struct ubi_device *ubi, uint32_t vol_id)
 	struct ubi_volume_table_record record = { 0 };
 	int ret = 0;
 
-	record_from_volumes(ubi, &record);
+	volumes_to_record(ubi, &record);
 
 	for (uint32_t i = index + 1; i < record.volume_count; ++i)
 		record.entries[i - 1] = record.entries[i];
@@ -415,7 +426,7 @@ int ubi_impl_volume_remove(struct ubi_device *ubi, uint32_t vol_id)
 	memset(&record.entries[record.volume_count], 0,
 	       sizeof(record.entries[0]));
 
-	ret = ubi_volume_table_commit(ubi, &record);
+	ret = ubi_impl_volume_table_commit(ubi, &record);
 
 	if (0 != ret) {
 		LOG_ERR("volume %u could not be struck from the volume table "
@@ -433,8 +444,8 @@ int ubi_impl_volume_remove(struct ubi_device *ubi, uint32_t vol_id)
 	 */
 	for (uint32_t lnum = 0; lnum < volume->leb_count; ++lnum) {
 		if (UBI_LEB_UNMAPPED != volume->eba[lnum])
-			ubi_peb_state_set(ubi, volume->eba[lnum],
-					  UBI_PEB_RECLAIM);
+			ubi_impl_peb_state_set(ubi, volume->eba[lnum],
+					       UBI_PEB_RECLAIM);
 	}
 
 	LOG_INF("removed volume %u \"%s\", revision %u", vol_id, volume->name,
@@ -488,10 +499,10 @@ int ubi_impl_volume_resize(struct ubi_device *ubi, uint32_t vol_id,
 
 	struct ubi_volume_table_record record = { 0 };
 
-	record_from_volumes(ubi, &record);
+	volumes_to_record(ubi, &record);
 	record.entries[index].leb_count = leb_count;
 
-	const int ret = ubi_volume_table_commit(ubi, &record);
+	const int ret = ubi_impl_volume_table_commit(ubi, &record);
 
 	if (0 != ret) {
 		LOG_ERR("the new size of volume %u could not be written to "
@@ -530,7 +541,7 @@ int ubi_impl_volume_find(const struct ubi_device *ubi, const char *name,
 int ubi_impl_volume_get_info(struct ubi_device *ubi, uint32_t vol_id,
 			     struct ubi_volume_info *info)
 {
-	const struct ubi_volume *volume = ubi_volume_by_id(ubi, vol_id);
+	const struct ubi_volume *volume = ubi_impl_volume_by_id(ubi, vol_id);
 
 	if (NULL == volume) {
 		LOG_ERR("no volume %u to describe", vol_id);

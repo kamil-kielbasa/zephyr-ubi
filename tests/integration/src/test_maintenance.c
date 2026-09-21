@@ -382,6 +382,49 @@ ZTEST(ubi_integration, test_an_even_device_has_nothing_to_relocate)
 	zassert_ok(ubi_device_deinit(ubi));
 }
 
+ZTEST(ubi_integration, test_a_block_too_far_gone_is_not_relocated_onto)
+{
+	const uint32_t vol_id = volume_ready(4);
+	struct ubi_device_info info = { 0 };
+	struct ubi_maintenance_result result = { 0 };
+	uint8_t written[PAYLOAD_SIZE];
+
+	const uint32_t far_gone = 8 * CONFIG_UBI_WEAR_LEVELING_THRESHOLD;
+
+	memset(written, 0xC3, sizeof(written));
+
+	for (uint32_t lnum = 0; lnum < 4; ++lnum)
+		zassert_ok(ubi_leb_change(ubi, vol_id, lnum, written,
+					  sizeof(written)));
+
+	/* Hand the volume table's cast-offs back, so that levelling has
+	 * somewhere sensible to go before the worn block is planted. */
+	zassert_ok(ubi_maintenance(ubi, UBI_MAINTENANCE_RECLAIM, 8, &result));
+	zassert_ok(ubi_device_get_info(ubi, &info));
+	zassert_ok(ubi_device_deinit(ubi));
+
+	/* One free block claiming wear far beyond anything levelling may
+	 * reach for. Moving cold data onto it would spend the last of it. */
+	stamp_erase_count(config.ikm_key_id, info.peb_count - 1, info.image_seq,
+			  far_gone);
+
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_ok(ubi_device_get_info(ubi, &info));
+
+	zassert_equal(far_gone, info.max_erase_count,
+		      "the stamped block has to be the worn one");
+	zassert_true(2 <= info.free_pebs, "levelling needs a choice to make");
+
+	zassert_ok(ubi_maintenance(ubi, UBI_MAINTENANCE_RELOCATE, 8, &result));
+
+	zassert_equal(0, result.performed,
+		      "the only worn block is out of reach, so there is "
+		      "nowhere worth moving to");
+	zassert_equal(0, result.remaining);
+
+	zassert_ok(ubi_device_deinit(ubi));
+}
+
 /* Tests: a block that will not take a write ------------------------------- */
 
 ZTEST(ubi_integration, test_a_block_that_refuses_a_write_is_retired)

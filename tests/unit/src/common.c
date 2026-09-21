@@ -19,6 +19,7 @@
 
 /* UBI headers: */
 #include "ubi_header.h"
+#include "ubi_key.h"
 
 /* Test headers: */
 #include "common.h"
@@ -54,17 +55,17 @@ psa_key_id_t import_ikm(const uint8_t *ikm, size_t length,
 	return key_id;
 }
 
-void key_fingerprint(psa_key_id_t key_id, uint8_t *tag, size_t tag_size)
+void key_fingerprint(psa_key_id_t key_id, uint8_t *MAC, size_t mac_size)
 {
 	static const uint8_t message[] = "fingerprint";
-	size_t tag_length = 0;
+	size_t mac_length = 0;
 
-	zassert_true(UBI_HEADER_TAG_SIZE <= tag_size);
+	zassert_true(UBI_MAC_SIZE <= mac_size);
 
 	zassert_equal(PSA_SUCCESS, psa_mac_compute(key_id, PSA_ALG_CMAC,
 						   message, sizeof(message) - 1,
-						   tag, tag_size, &tag_length));
-	zassert_equal(UBI_HEADER_TAG_SIZE, tag_length);
+						   MAC, mac_size, &mac_length));
+	zassert_equal(UBI_MAC_SIZE, mac_length);
 }
 
 void fix_crc(uint8_t *buffer)

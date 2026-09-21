@@ -1,11 +1,13 @@
 /**
  * \file    ubi_state.h
  * \author  Kamil Kielbasa
- * \brief   What the device looks like, and whether it is still trusted.
+ * \brief   What the device looks like, whether it is still trusted, and what
+ *          it has to report.
  *
- *          The two belong together: the application decides whether to trust
- *          the flash from exactly the picture this module paints, so there is
- *          one place that takes stock and one place that asks.
+ *          The three belong together: the application decides whether to
+ *          trust the flash from exactly the picture this module paints, so
+ *          there is one place that takes stock, one place that asks, and one
+ *          place that speaks up.
  *
  * \copyright Copyright (c) 2026
  *
@@ -17,10 +19,31 @@
 
 /* Include files ----------------------------------------------------------- */
 
+/* Standard library headers: */
+#include <stdint.h>
+
 /* UBI headers: */
+#include <ubi/ubi.h>
+
 #include "ubi_private.h"
 
 /* Module interface function declarations ---------------------------------- */
+
+/**
+ * \brief Hand one event to the application.
+ *
+ *        Every module that can discover damage reports it through here, so
+ *        the application hears one voice whichever layer noticed.
+ *
+ * \param[in] ubi                       Device the event concerns.
+ * \param type                          What happened.
+ * \param pnum                          Physical erase block concerned.
+ * \param vol_id                        Volume, or #UBI_VOL_ID_INVALID.
+ * \param lnum                          Logical erase block, meaningful only
+ *                                      together with \p vol_id.
+ */
+void ubi_impl_event_emit(const struct ubi_device *ubi, enum ubi_event_type type,
+			 uint32_t pnum, uint32_t vol_id, uint32_t lnum);
 
 /**
  * \brief Take stock of the device as it stands.
@@ -34,8 +57,8 @@
  *         A block carries a state UBI never wrote, so the handle has been
  *         corrupted and the counts would be a lie.
  */
-int ubi_state_describe(const struct ubi_device *ubi,
-		       struct ubi_device_info *info);
+int ubi_impl_state_describe(const struct ubi_device *ubi,
+			    struct ubi_device_info *info);
 
 /**
  * \brief Ask the application whether it still trusts the device.
@@ -52,7 +75,7 @@ int ubi_state_describe(const struct ubi_device *ubi,
  *         The picture could not be painted, so there was nothing to ask
  *         about.
  */
-int ubi_state_check(struct ubi_device *ubi);
+int ubi_impl_state_check(struct ubi_device *ubi);
 
 /**
  * \brief Clear an operation that is about to write.
@@ -71,6 +94,6 @@ int ubi_state_check(struct ubi_device *ubi);
  * \retval -EFAULT
  *         The handle has been corrupted.
  */
-int ubi_state_guard(struct ubi_device *ubi);
+int ubi_impl_state_guard(struct ubi_device *ubi);
 
 #endif /* UBI_STATE_H */

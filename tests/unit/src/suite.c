@@ -36,7 +36,8 @@ static void *suite_setup(void)
 
 	ikm_key = import_ikm(test_ikm, sizeof(test_ikm), PSA_KEY_USAGE_DERIVE);
 
-	zassert_ok(ubi_key_derive(ikm_key, &key_header, &key_volume_table));
+	zassert_ok(
+		ubi_impl_key_derive(ikm_key, &key_header, &key_volume_table));
 
 	return NULL;
 }
@@ -45,9 +46,9 @@ static void suite_teardown(void *fixture)
 {
 	ARG_UNUSED(fixture);
 
-	ubi_key_destroy(&key_header);
-	ubi_key_destroy(&key_volume_table);
-	ubi_key_destroy(&ikm_key);
+	ubi_impl_key_destroy(&key_header);
+	ubi_impl_key_destroy(&key_volume_table);
+	ubi_impl_key_destroy(&ikm_key);
 }
 
 ZTEST_SUITE(ubi_unit, NULL, suite_setup, NULL, NULL, suite_teardown);

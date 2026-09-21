@@ -28,6 +28,9 @@
 /* UBI headers: */
 #include <ubi/ubi.h>
 
+#include "ubi_header.h"
+#include "ubi_key.h"
+
 /* Test headers: */
 #include "common.h"
 
@@ -141,6 +144,38 @@ void partition_fill(uint8_t value)
 						    sizeof(chunk)));
 		}
 	}
+
+	flash_area_close(flash_area);
+}
+
+void stamp_erase_count(psa_key_id_t ikm_key_id, uint32_t pnum,
+		       uint32_t image_seq, uint64_t erase_count)
+{
+	psa_key_id_t key_header = PSA_KEY_ID_NULL;
+	psa_key_id_t key_volume_table = PSA_KEY_ID_NULL;
+	uint8_t buffer[UBI_HEADER_SIZE];
+
+	const struct ubi_ec_header header = {
+		.erase_count = erase_count,
+		.image_seq = image_seq,
+		.vid_header_offset = UBI_TEST_VID_OFFSET,
+		.data_offset = UBI_TEST_DATA_OFFSET,
+	};
+
+	zassert_ok(ubi_impl_key_derive(ikm_key_id, &key_header,
+				       &key_volume_table));
+	zassert_ok(ubi_impl_header_ec_serialize(&header, key_header, pnum,
+						buffer, sizeof(buffer)));
+
+	ubi_impl_key_destroy(&key_header);
+	ubi_impl_key_destroy(&key_volume_table);
+
+	const struct flash_area *flash_area = NULL;
+	const off_t block = (off_t)pnum * UBI_TEST_PEB_SIZE;
+
+	zassert_ok(flash_area_open(TEST_PARTITION, &flash_area));
+	zassert_ok(flash_area_erase(flash_area, block, UBI_TEST_PEB_SIZE));
+	zassert_ok(flash_area_write(flash_area, block, buffer, sizeof(buffer)));
 
 	flash_area_close(flash_area);
 }
@@ -267,7 +302,7 @@ uint32_t corrupt_header_of_data_matching(const uint8_t *needle, size_t length)
 					   sizeof(header)));
 
 		/* Any byte with a bit left to clear will do: the checksum in
-		 * front of the tag covers the whole header. */
+		 * front of the MAC covers the whole header. */
 		for (size_t i = 0; i < sizeof(header); ++i) {
 			if (0x00 == header[i])
 				continue;

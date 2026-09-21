@@ -18,6 +18,7 @@ manifest:
           - cmsis
           - hal_nordic
           - mbedtls
+          - tf-psa-crypto
 
   self:
     path: zephyr-ubi

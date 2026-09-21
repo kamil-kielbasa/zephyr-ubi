@@ -5,17 +5,12 @@
  *
  *          The application supplies a PSA handle to its input keying
  *          material and UBI derives two keys from it with HKDF-SHA256: one
- *          for the block headers, one for the volume table record. Splitting
- *          them costs nothing and keeps the two domains apart, so a volume
- *          table record can never pass as a block header.
+ *          for the block headers, one for the volume table record, so that a
+ *          record can never pass as a header.
  *
- *          The image sequence number deliberately plays no part here. It
- *          lives inside the authenticated headers, so a leftover block from
- *          an earlier format is caught by comparing that field, not by
- *          holding a different key. Keeping it out of the derivation is what
- *          lets attach build its keys before it has read a single byte of
- *          flash, which in turn keeps every field on the flash subject to
- *          verification before use.
+ *          The image sequence number plays no part here; it lives inside the
+ *          authenticated headers instead. That is what lets attach build its
+ *          keys before reading a single byte of flash.
  *
  * \copyright Copyright (c) 2026
  *
@@ -43,15 +38,29 @@
  *
  * PSA cannot supply this: key length is a policy choice, not a property of
  * the algorithm. AES-128 is ample, because forging a header means forging a
- * 128-bit tag rather than recovering the key.
+ * 128-bit MAC rather than recovering the key.
  */
 #define UBI_KEY_BITS (128)
+
+/**
+ * Length of the AES-CMAC written into every header and into the volume table
+ * record.
+ *
+ * Written out rather than taken from PSA on purpose: this is an on-flash
+ * dimension, so a change in the crypto backend must not move it silently.
+ * The assert below is what ties the two together.
+ */
+#define UBI_MAC_SIZE (16)
 
 BUILD_ASSERT(128 == UBI_KEY_BITS || 192 == UBI_KEY_BITS || 256 == UBI_KEY_BITS,
 	     "UBI_KEY_BITS must be a length AES accepts");
 
 BUILD_ASSERT(0 != PSA_MAC_LENGTH(PSA_KEY_TYPE_AES, UBI_KEY_BITS, PSA_ALG_CMAC),
 	     "PSA does not recognise AES-CMAC at UBI_KEY_BITS");
+
+BUILD_ASSERT(UBI_MAC_SIZE == PSA_MAC_LENGTH(PSA_KEY_TYPE_AES, UBI_KEY_BITS,
+					    PSA_ALG_CMAC),
+	     "on-flash MAC size must match what AES-CMAC produces");
 
 /* Module interface function declarations ---------------------------------- */
 
@@ -78,8 +87,8 @@ BUILD_ASSERT(0 != PSA_MAC_LENGTH(PSA_KEY_TYPE_AES, UBI_KEY_BITS, PSA_ALG_CMAC),
  * \retval -EIO
  *         The crypto backend failed.
  */
-int ubi_key_derive(psa_key_id_t ikm_key_id, psa_key_id_t *key_header,
-		   psa_key_id_t *key_volume_table);
+int ubi_impl_key_derive(psa_key_id_t ikm_key_id, psa_key_id_t *key_header,
+			psa_key_id_t *key_volume_table);
 
 /**
  * \brief Destroy a derived key and clear the handle.
@@ -89,6 +98,6 @@ int ubi_key_derive(psa_key_id_t ikm_key_id, psa_key_id_t *key_header,
  *
  * \param[in,out] key_id                Handle to destroy.
  */
-void ubi_key_destroy(psa_key_id_t *key_id);
+void ubi_impl_key_destroy(psa_key_id_t *key_id);
 
 #endif /* UBI_KEY_H */

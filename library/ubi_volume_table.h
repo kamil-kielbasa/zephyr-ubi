@@ -8,11 +8,9 @@
  *          was formatted for. It lives in an internal volume of its own, so
  *          it wanders with wear levelling instead of pinning two blocks.
  *
- *          UBI stores application data verbatim, which means the record
- *          cannot ride on that path: it carries its own AES-CMAC tag, under a
- *          key separate from the one guarding block headers. The tag of the
- *          VID header proves which block the record sits in; this tag proves
- *          the record's contents.
+ *          It carries its own AES-CMAC, under a key separate from the one
+ *          guarding block headers: the VID header's MAC proves which block
+ *          the record sits in, this one proves its contents.
  *
  * \copyright Copyright (c) 2026
  *
@@ -71,7 +69,7 @@
 #define UBI_VOLUME_TABLE_RECORD_MAX_SIZE                              \
 	(UBI_VOLUME_TABLE_PREAMBLE_SIZE +                             \
 	 CONFIG_UBI_MAX_NR_OF_VOLUMES * UBI_VOLUME_TABLE_ENTRY_SIZE + \
-	 UBI_HEADER_TAG_SIZE)
+	 UBI_MAC_SIZE)
 
 /* Types and type definitions ---------------------------------------------- */
 
@@ -143,14 +141,14 @@ struct ubi_device;
  *         No block holds that copy, or the one that does holds nothing
  *         finished; look for the other copy.
  * \retval -EBADMSG
- *         The bytes are complete but the tag does not verify.
+ *         The bytes are complete but the MAC does not verify.
  * \retval -ENOTSUP
  *         The record is authentic but this build cannot read its version.
  * \retval -EIO
  *         The flash driver failed.
  */
-int ubi_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
-			  struct ubi_volume_table_record *record);
+int ubi_impl_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
+			       struct ubi_volume_table_record *record);
 
 /**
  * \brief Write one copy of the volume table record.
@@ -158,7 +156,7 @@ int ubi_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
  *        Goes to the block recorded for \p lnum, which must already carry an
  *        erase counter header and nothing else, and takes the next sequence
  *        number from the device. The VID header goes down before the record,
- *        so an interruption leaves something \ref ubi_volume_table_read
+ *        so an interruption leaves something \ref ubi_impl_volume_table_read
  *        reports as \c -ENOENT.
  *
  * \param[in,out] ubi                   Device holding the partition; its
@@ -176,8 +174,8 @@ int ubi_volume_table_read(const struct ubi_device *ubi, uint32_t lnum,
  * \retval -EIO
  *         The crypto backend or the flash driver failed.
  */
-int ubi_volume_table_write(struct ubi_device *ubi, uint32_t lnum,
-			   const struct ubi_volume_table_record *record);
+int ubi_impl_volume_table_write(struct ubi_device *ubi, uint32_t lnum,
+				const struct ubi_volume_table_record *record);
 
 /**
  * \brief Put a record in force, leaving both copies carrying it.
@@ -205,7 +203,7 @@ int ubi_volume_table_write(struct ubi_device *ubi, uint32_t lnum,
  *         The crypto backend or the flash driver failed before any copy was
  *         written; what was in force still is.
  */
-int ubi_volume_table_commit(struct ubi_device *ubi,
-			    const struct ubi_volume_table_record *record);
+int ubi_impl_volume_table_commit(struct ubi_device *ubi,
+				 const struct ubi_volume_table_record *record);
 
 #endif /* UBI_VOLUME_TABLE_H */

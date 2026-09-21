@@ -6,14 +6,8 @@
  *          Private to the library. Consumers include \c <ubi/ubi.h>, where
  *          \ref ubi_device is an opaque forward declaration.
  *
- *          The handle is split by concern rather than kept as one flat
- *          record: the geometry, the keys, the volumes and the block
- *          bookkeeping each stand on their own.
- *
  *          Everything whose size follows the partition lives behind a
- *          pointer and is taken from the heap when the device attaches. How
- *          many blocks a partition holds is a property of the flash, not of
- *          the build, so it is not a build-time constant.
+ *          pointer and is taken from the heap when the device attaches.
  *
  * \copyright Copyright (c) 2026
  *
@@ -62,6 +56,9 @@
  *  unmapped sentinel. */
 #define UBI_MAX_PEB_COUNT (UINT16_MAX - 1)
 
+/** Linux UBI's 31-bit bound. The flash field is 64-bit, the RAM copy 32-bit. */
+#define UBI_MAX_ERASE_COUNT (0x7FFFFFFFUL)
+
 /* Types and type definitions ---------------------------------------------- */
 
 /**
@@ -77,6 +74,10 @@ enum ubi_peb_state {
 	UBI_PEB_MAPPED,
 	/** Released by its logical block, awaiting #UBI_MAINTENANCE_RECLAIM. */
 	UBI_PEB_RECLAIM,
+	/** Its erase counter header verified but the volume identifier header
+	 *  behind it did not, and the data area is not blank. Preserved rather
+	 *  than erased, so that whatever it still holds can be looked at. */
+	UBI_PEB_CORRUPT,
 	/** Refused a write or an erase. Out of service, but
 	 *  #UBI_MAINTENANCE_REPAIR will give it one more chance. */
 	UBI_PEB_BAD,
@@ -87,7 +88,7 @@ enum ubi_peb_state {
 	UBI_PEB_WORN_OUT,
 };
 
-BUILD_ASSERT(UBI_PEB_BAD <= UINT8_MAX,
+BUILD_ASSERT(UBI_PEB_WORN_OUT <= UINT8_MAX,
 	     "block states must fit the byte they are stored in");
 
 /**

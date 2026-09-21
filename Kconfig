@@ -21,6 +21,10 @@ menuconfig UBI
 
 if UBI
 
+#
+# What the device looks like.
+#
+
 config UBI_MAX_NR_OF_VOLUMES
         int "Maximum number of volumes"
         default 4
@@ -31,53 +35,56 @@ config UBI_MAX_NR_OF_VOLUMES
           but how many volumes they are divided into is a design choice of
           the application.
 
-config UBI_VERIFY_ON_READ
-        bool "Verify the VID header before every read"
-        default n
+#
+# How wear is spread. These two work together and are the ones worth tuning
+# for a given part.
+#
+
+config UBI_WEAR_LEVELING_THRESHOLD
+        int "Erase count spread that makes relocation worthwhile"
+        default 256
+        range 64 512
         help
-          Re-reads and authenticates the header on every ubi_leb_read().
-          Headers are always verified during attach, so this only guards
-          against tampering while the device is running, and it costs an
-          extra flash read plus a CMAC on the hottest path.
+          Two things at once, which is why there is one knob and not two.
+
+          It decides when levelling has work: a block in use whose erase
+          count is this far below the block it would be moved onto is worth
+          moving, and ubi_device_get_info() reports how many such blocks
+          there are.
+
+          It also bounds which free block gets handed out. An ordinary write
+          takes the most worn free block within this many erases of the least
+          worn one; relocation reaches twice as far. Bounding both ends is
+          what stops either the freshest or the most worn block from
+          absorbing everything. Linux UBI bounds the same search with
+          wl_free_max_diff, which is likewise twice its threshold.
+
+          Lower levels wear more evenly at the cost of more copying.
 
 config UBI_PROTECTION_CYCLES
         int "Erases a freshly handed out block is left alone for"
         default 64
         range 0 255
         help
-          A block is given out because it was the least worn one free, which
-          makes it the least worn one in use the moment something is written
-          to it, and so the first thing wear levelling would want to move.
-          Moving it would be wasted work: the caller has only just filled it
-          and may be about to rewrite it anyway.
+          A block just handed out holds data the caller has only begun
+          writing and may be about to replace, so moving it is wasted work.
+          This is how long levelling keeps its hands off.
 
-          This counts erases anywhere on the device, not time. Zero turns
+          Counted in erases anywhere on the device, not in time. Zero turns
           the protection off. The count lives in RAM, so an attach starts
           every block unprotected.
 
-          Too small is the dangerous direction. The window has to outlast
-          how often the hottest data is rewritten, or levelling carries a
-          block off just before the caller replaces it anyway. Measured on
-          a pool of worn blocks flooded with barely used ones, a window of
-          8 left every one of 4096 rewrites being carried off and doubled
-          the erase count; 16 and above stopped it dead. Linux uses 10, but
-          its levelling threshold is 4096 against our 256, so it reaches
-          for a block far less often.
+          Too small is the dangerous direction: the window has to outlast
+          how often the hottest data is rewritten. Measured on a pool of worn
+          blocks flooded with barely used ones, a window of 8 left every one
+          of 4096 rewrites being carried off and doubled the erase count;
+          16 and above stopped it dead. Linux uses 10, but its levelling
+          threshold is 4096 against our 256, so it reaches for a block far
+          less often.
 
-config UBI_SELF_CHECKS
-        bool "Check the library's own choices at runtime"
-        default n
-        help
-          Some of what UBI decides cannot be seen from outside: which block
-          it allocated and which one it moved data off are both answers to
-          "the least worn one", and the only evidence a caller gets is an
-          erase counter that went up. This turns those decisions into
-          statements the library checks against itself.
-
-          Each check is a second pass over the block table, so it doubles
-          the cost of a choice that is already the expensive part of an
-          allocation. Meant for tests and for bringing up a new part, not
-          for shipping.
+#
+# How often the application is consulted.
+#
 
 config UBI_STATE_CHECK_INTERVAL
         int "Flash writes between state checks"
@@ -94,13 +101,33 @@ config UBI_STATE_CHECK_INTERVAL
           is not a way around the check. It does no flash I/O, so a small
           number is cheap.
 
-config UBI_WEAR_LEVELING_THRESHOLD
-        int "Erase count spread that makes relocation worthwhile"
-        default 256
-        range 64 512
+#
+# What to pay for extra checking. Both cost throughput and neither changes
+# what is written to the flash.
+#
+
+config UBI_VERIFY_ON_READ
+        bool "Verify the VID header before every read"
+        default n
         help
-          Reported through ubi_device_get_info(); a spread wider than this
-          means UBI_MAINTENANCE_RELOCATE has work to do.
+          Re-reads and authenticates the header on every ubi_leb_read().
+          Headers are always verified during attach, so this only guards
+          against tampering while the device is running, and it costs an
+          extra flash read plus a CMAC on the hottest path.
+
+config UBI_SELF_CHECKS
+        bool "Check the library's own choices at runtime"
+        default n
+        help
+          Which block UBI allocated and which one it moved data off cannot be
+          seen from outside; the only evidence a caller gets is an erase
+          counter that went up. This turns those decisions into statements
+          the library checks against itself.
+
+          Each check is a second pass over the block table, so it doubles the
+          cost of a choice that is already the expensive part of an
+          allocation. Meant for tests and for bringing up a new part, not for
+          shipping.
 
 module = UBI
 module-str = ubi

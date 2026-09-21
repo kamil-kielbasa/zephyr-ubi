@@ -54,7 +54,8 @@ static bool leb_range_aligned(const struct ubi_device *ubi, uint32_t offset,
  *        attach and the block loses to whatever held the mapping before.
  */
 static int leb_claim(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
-		     const uint8_t *buffer, size_t length, bool sealed);
+		     uint16_t previous, const uint8_t *buffer, size_t length,
+		     bool sealed);
 
 /* Static function definitions --------------------------------------------- */
 
@@ -83,17 +84,11 @@ static bool leb_range_aligned(const struct ubi_device *ubi, uint32_t offset,
 }
 
 static int leb_claim(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
-		     const uint8_t *buffer, size_t length, bool sealed)
+		     uint16_t previous, const uint8_t *buffer, size_t length,
+		     bool sealed)
 {
-	uint16_t previous = UBI_LEB_UNMAPPED;
-	int ret = ubi_volume_leb_get(ubi, vol_id, lnum, &previous);
-
-	if (0 != ret)
-		return ret;
-
 	uint32_t pnum = 0;
-
-	ret = ubi_peb_allocate(ubi, &pnum);
+	int ret = ubi_impl_peb_allocate_for_write(ubi, &pnum);
 
 	if (0 != ret)
 		return ret;
@@ -108,28 +103,28 @@ static int leb_claim(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 		.copy_flag = sealed,
 	};
 
-	ret = ubi_vid_header_write(ubi, pnum, &vid);
+	ret = ubi_impl_header_vid_write(ubi, pnum, &vid);
 
 	if (0 != ret)
 		goto give_back;
 
 	if (0 != length) {
-		ret = ubi_io_write_data(ubi, pnum, 0, buffer, length);
+		ret = ubi_impl_io_write_data(ubi, pnum, 0, buffer, length);
 
 		if (0 != ret)
 			goto give_back;
 	}
 
-	ret = ubi_volume_leb_set(ubi, vol_id, lnum, (uint16_t)pnum);
+	ret = ubi_impl_volume_leb_set(ubi, vol_id, lnum, (uint16_t)pnum);
 
 	if (0 != ret)
 		goto give_back;
 
 	ubi->global_sqnum = vid.sqnum;
-	ubi_peb_state_set(ubi, pnum, UBI_PEB_MAPPED);
+	ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_MAPPED);
 
 	if (UBI_LEB_UNMAPPED != previous)
-		ubi_peb_state_set(ubi, previous, UBI_PEB_RECLAIM);
+		ubi_impl_peb_state_set(ubi, previous, UBI_PEB_RECLAIM);
 
 	return 0;
 
@@ -137,7 +132,7 @@ give_back:
 	/* The mapping has not moved, so the logical block is intact. The
 	 * physical one is retired rather than queued: handing it back would
 	 * let the next allocation pick it and fail the same way. */
-	ubi_peb_retire(ubi, pnum, vol_id, lnum);
+	ubi_impl_peb_retire(ubi, pnum, vol_id, lnum);
 
 	return ret;
 }
@@ -147,13 +142,10 @@ give_back:
 int ubi_impl_leb_map(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum)
 {
 	uint16_t pnum = UBI_LEB_UNMAPPED;
-	int ret = ubi_volume_leb_get(ubi, vol_id, lnum, &pnum);
+	const int ret = ubi_impl_volume_leb_get(ubi, vol_id, lnum, &pnum);
 
-	if (0 != ret) {
-		LOG_ERR("volume %u has no block %u to map (%d)", vol_id, lnum,
-			ret);
+	if (0 != ret)
 		return ret;
-	}
 
 	if (UBI_LEB_UNMAPPED != pnum) {
 		LOG_ERR("volume %u block %u already has PEB %u behind it",
@@ -161,39 +153,28 @@ int ubi_impl_leb_map(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum)
 		return -EEXIST;
 	}
 
-	ret = leb_claim(ubi, vol_id, lnum, NULL, 0, false);
-
-	if (0 != ret) {
-		LOG_ERR("volume %u block %u stayed unmapped (%d)", vol_id, lnum,
-			ret);
-		return ret;
-	}
-
-	return 0;
+	return leb_claim(ubi, vol_id, lnum, pnum, NULL, 0, false);
 }
 
 int ubi_impl_leb_unmap(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum)
 {
 	uint16_t pnum = UBI_LEB_UNMAPPED;
-	int ret = ubi_volume_leb_get(ubi, vol_id, lnum, &pnum);
+	int ret = ubi_impl_volume_leb_get(ubi, vol_id, lnum, &pnum);
 
-	if (0 != ret) {
-		LOG_ERR("volume %u has no block %u to unmap (%d)", vol_id, lnum,
-			ret);
+	if (0 != ret)
 		return ret;
-	}
 
 	if (UBI_LEB_UNMAPPED == pnum)
 		return 0;
 
-	ret = ubi_volume_leb_set(ubi, vol_id, lnum, UBI_LEB_UNMAPPED);
+	ret = ubi_impl_volume_leb_set(ubi, vol_id, lnum, UBI_LEB_UNMAPPED);
 
 	if (0 != ret)
 		return ret;
 
 	/* Queued, not erased: the erase is the application's call to make,
 	 * so until then the contents stay readable from raw flash. */
-	ubi_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
+	ubi_impl_peb_state_set(ubi, pnum, UBI_PEB_RECLAIM);
 
 	return 0;
 }
@@ -201,29 +182,23 @@ int ubi_impl_leb_unmap(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum)
 int ubi_impl_leb_erase(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum)
 {
 	uint16_t pnum = UBI_LEB_UNMAPPED;
-	int ret = ubi_volume_leb_get(ubi, vol_id, lnum, &pnum);
-
-	if (0 != ret) {
-		LOG_ERR("volume %u has no block %u to erase (%d)", vol_id, lnum,
-			ret);
-		return ret;
-	}
-
-	if (UBI_LEB_UNMAPPED == pnum)
-		return 0;
-
-	ret = ubi_volume_leb_set(ubi, vol_id, lnum, UBI_LEB_UNMAPPED);
+	int ret = ubi_impl_volume_leb_get(ubi, vol_id, lnum, &pnum);
 
 	if (0 != ret)
 		return ret;
 
-	ret = ubi_peb_prepare(ubi, pnum);
+	if (UBI_LEB_UNMAPPED == pnum)
+		return 0;
+
+	ret = ubi_impl_volume_leb_set(ubi, vol_id, lnum, UBI_LEB_UNMAPPED);
+
+	if (0 != ret)
+		return ret;
+
+	ret = ubi_impl_peb_prepare(ubi, pnum);
 
 	if (0 != ret) {
-		ubi_peb_retire(ubi, pnum, vol_id, lnum);
-		LOG_ERR("PEB %u: held volume %u block %u and could not be "
-			"erased (%d)",
-			pnum, vol_id, lnum, ret);
+		ubi_impl_peb_retire(ubi, pnum, vol_id, lnum);
 		return ret;
 	}
 
@@ -234,13 +209,10 @@ int ubi_impl_leb_read(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 		      uint32_t offset, uint8_t *buffer, size_t length)
 {
 	uint16_t pnum = UBI_LEB_UNMAPPED;
-	const int ret = ubi_volume_leb_get(ubi, vol_id, lnum, &pnum);
+	const int ret = ubi_impl_volume_leb_get(ubi, vol_id, lnum, &pnum);
 
-	if (0 != ret) {
-		LOG_ERR("volume %u has no block %u to read (%d)", vol_id, lnum,
-			ret);
+	if (0 != ret)
 		return ret;
-	}
 
 	if (!leb_range_fits(ubi, offset, length)) {
 		LOG_ERR("volume %u block %u: reading %zu bytes at %u runs past "
@@ -257,7 +229,7 @@ int ubi_impl_leb_read(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 
 	if (IS_ENABLED(CONFIG_UBI_VERIFY_ON_READ)) {
 		struct ubi_headers headers = { 0 };
-		const int verified = ubi_headers_read(ubi, pnum, &headers);
+		const int verified = ubi_impl_header_read(ubi, pnum, &headers);
 
 		if (0 != verified)
 			return verified;
@@ -270,12 +242,18 @@ int ubi_impl_leb_read(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 		}
 	}
 
-	return ubi_io_read_data(ubi, pnum, offset, buffer, length);
+	return ubi_impl_io_read_data(ubi, pnum, offset, buffer, length);
 }
 
 int ubi_impl_leb_change(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 			const uint8_t *buffer, size_t length)
 {
+	uint16_t pnum = UBI_LEB_UNMAPPED;
+	const int ret = ubi_impl_volume_leb_get(ubi, vol_id, lnum, &pnum);
+
+	if (0 != ret)
+		return ret;
+
 	if (!leb_range_fits(ubi, 0, length)) {
 		LOG_ERR("volume %u block %u: %zu bytes do not fit in the %u a "
 			"block holds",
@@ -290,15 +268,7 @@ int ubi_impl_leb_change(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 		return -EINVAL;
 	}
 
-	const int ret = leb_claim(ubi, vol_id, lnum, buffer, length, true);
-
-	if (0 != ret) {
-		LOG_ERR("volume %u block %u kept its previous contents (%d)",
-			vol_id, lnum, ret);
-		return ret;
-	}
-
-	return 0;
+	return leb_claim(ubi, vol_id, lnum, pnum, buffer, length, true);
 }
 
 int ubi_impl_leb_write_at(struct ubi_device *ubi, uint32_t vol_id,
@@ -306,13 +276,10 @@ int ubi_impl_leb_write_at(struct ubi_device *ubi, uint32_t vol_id,
 			  size_t length)
 {
 	uint16_t pnum = UBI_LEB_UNMAPPED;
-	int ret = ubi_volume_leb_get(ubi, vol_id, lnum, &pnum);
+	int ret = ubi_impl_volume_leb_get(ubi, vol_id, lnum, &pnum);
 
-	if (0 != ret) {
-		LOG_ERR("volume %u has no block %u to write to (%d)", vol_id,
-			lnum, ret);
+	if (0 != ret)
 		return ret;
-	}
 
 	if (!leb_range_fits(ubi, offset, length)) {
 		LOG_ERR("volume %u block %u: writing %zu bytes at %u runs past "
@@ -332,41 +299,33 @@ int ubi_impl_leb_write_at(struct ubi_device *ubi, uint32_t vol_id,
 	}
 
 	if (UBI_LEB_UNMAPPED == pnum) {
-		ret = leb_claim(ubi, vol_id, lnum, NULL, 0, false);
+		ret = leb_claim(ubi, vol_id, lnum, pnum, NULL, 0, false);
 
-		if (0 != ret) {
-			LOG_ERR("volume %u block %u could not be given a "
-				"physical block to write into (%d)",
-				vol_id, lnum, ret);
+		if (0 != ret)
 			return ret;
-		}
 
-		ret = ubi_volume_leb_get(ubi, vol_id, lnum, &pnum);
+		ret = ubi_impl_volume_leb_get(ubi, vol_id, lnum, &pnum);
 
 		if (0 != ret)
 			return ret;
 	}
 
-	return ubi_io_write_data(ubi, pnum, offset, buffer, length);
+	return ubi_impl_io_write_data(ubi, pnum, offset, buffer, length);
 }
 
 int ubi_impl_leb_get_info(struct ubi_device *ubi, uint32_t vol_id,
 			  uint32_t lnum, struct ubi_leb_info *info)
 {
 	uint16_t pnum = UBI_LEB_UNMAPPED;
-	const int ret = ubi_volume_leb_get(ubi, vol_id, lnum, &pnum);
+	const int ret = ubi_impl_volume_leb_get(ubi, vol_id, lnum, &pnum);
 
-	if (0 != ret) {
-		LOG_ERR("volume %u has no block %u to describe (%d)", vol_id,
-			lnum, ret);
+	if (0 != ret)
 		return ret;
-	}
 
+	const bool mapped = (UBI_LEB_UNMAPPED != pnum);
 	const struct ubi_leb_info described = {
-		.mapped = (UBI_LEB_UNMAPPED != pnum),
-		.erase_count = (UBI_LEB_UNMAPPED != pnum) ?
-				       ubi->blocks.erase_count[pnum] :
-				       0,
+		.mapped = mapped,
+		.erase_count = mapped ? ubi->blocks.erase_count[pnum] : 0,
 	};
 
 	*info = described;

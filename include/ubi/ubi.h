@@ -3,18 +3,13 @@
  * \author  Kamil Kielbasa
  * \brief   Unsorted Block Images (UBI) public API.
  *
- *          UBI maps logical erase blocks (LEB) onto physical erase blocks
- *          (PEB), spreads wear across the partition, survives power loss and
+ *          Maps logical erase blocks (LEB) onto physical erase blocks (PEB),
+ *          spreads wear across the partition, survives power loss and
  *          authenticates its own metadata with AES-CMAC.
  *
- *          UBI never encrypts or authenticates application data. Only the EC
- *          and VID headers and the internal volume table are protected;
- *          anything written through \ref ubi_leb_change or
- *          \ref ubi_leb_write_at is stored verbatim. If it has to be
- *          confidential or tamper-evident, the layer above seals it.
- *
- *          All key material enters as a PSA key handle and never crosses this
- *          interface as raw bytes.
+ *          Application data is stored verbatim: only the EC and VID headers
+ *          and the internal volume table are protected. Key material enters
+ *          as a PSA key handle and never crosses this interface as raw bytes.
  *
  * \copyright Copyright (c) 2026
  *
@@ -68,21 +63,15 @@ enum ubi_event_type {
 	/** Header CRC passed but the CMAC did not: a field was changed and the
 	 *  checksum recomputed. */
 	UBI_EVENT_HDR_TAMPERED,
-	/** The volume table record failed its CMAC. */
-	/** A copy of the volume table could not be used. The record carries a
-	 *  checksum inside a header sealed with the same key, so a changed
-	 *  byte and a forged record are indistinguishable from out here:
-	 *  whoever could repair the checksum would already hold the key. All
-	 *  that is known is that one copy is gone. */
+	/** A copy of the volume table could not be used. Damage and forgery
+	 *  are indistinguishable from out here, because repairing the
+	 *  checksum would need the key. */
 	UBI_EVENT_VOLUME_TABLE_CORRUPT,
 	/** Only one usable copy of the volume table is left, or the two do
-	 *  not agree. The device works, but a single erase would now take
-	 *  the layout back a revision instead of being survivable. Clear it
-	 *  with #UBI_MAINTENANCE_REPAIR. */
+	 *  not agree. Clear it with #UBI_MAINTENANCE_REPAIR. */
 	UBI_EVENT_VOLUME_TABLE_DEGRADED,
 	/** A block claims a volume or logical block the volume table does not
-	 *  describe. Both are authentic, so this is an inconsistency rather
-	 *  than an attack: the block is queued for reclaim. */
+	 *  describe. The block is queued for reclaim. */
 	UBI_EVENT_LEB_ORPHANED,
 	/** A physical erase block was retired after a persistent I/O error. */
 	UBI_EVENT_PEB_BAD,
@@ -105,11 +94,9 @@ struct ubi_event {
 /**
  * \brief Event notification callback.
  *
- *        Called synchronously from whichever context detected the condition,
- *        with the device lock held. Do not call back into UBI and do not
- *        block.
- *
- *        Events are informational and never change what UBI does next.
+ *        Called synchronously with the device lock held. Do not call back
+ *        into UBI and do not block. Events are informational and never
+ *        change what UBI does next.
  *
  * \param[in] event                     Detected condition.
  * \param[in] user_context              User context from \ref ubi_config.
@@ -126,29 +113,15 @@ typedef void (*ubi_event_cb_t)(const struct ubi_event *event,
 /**
  * \brief Device geometry, block accounting and rollback counters.
  *
- *        Handed to \ref ubi_state_cb_t and served by
- *        \ref ubi_device_get_info.
+ *        \p revision, \p global_sqnum and \p total_erase_count never decrease
+ *        under normal operation, so an application detects a rollback of the
+ *        device by comparing them against a trusted, rollback-protected
+ *        store. A drop in \p total_erase_count only counts as one while
+ *        \p healthy_pebs holds, because a block that stops verifying takes
+ *        its erase count out of the sum.
  *
- *        The last group is what an application anchors against to detect a
- *        rollback of the whole device: compare them against the values last
- *        committed to a trusted, rollback-protected store (PSA ITS, an RPMC
- *        counter, a secure element).
- *
- *        Under normal operation \p revision, \p global_sqnum and
- *        \p total_erase_count never decrease. So:
- *
- *        - \p revision or \p global_sqnum went backwards: the flash was
- *          rolled back to an earlier state.
- *        - \p total_erase_count went backwards while \p healthy_pebs stayed
- *          the same: individual blocks were rolled back. The second half of
- *          the condition matters, because a block that stops verifying takes
- *          its erase count out of the sum without any rollback having
- *          happened.
- *
- *        This detects a rollback of the whole device. It does not detect a
- *        rollback of a single LEB: restoring one block to an older authentic
- *        image leaves \p global_sqnum untouched. Closing that gap needs
- *        per-LEB state in the trusted store, updated on every write. Linux
+ *        A rollback of a single LEB goes undetected: restoring one block to
+ *        an older authentic image leaves \p global_sqnum untouched. Linux
  *        UBIFS declares the same limitation.
  */
 struct ubi_device_info {
@@ -171,6 +144,9 @@ struct ubi_device_info {
 	uint32_t relocatable_pebs;
 	/** Retired after tampering or a persistent I/O error, never reused. */
 	uint32_t bad_pebs;
+	/** Damaged behind a valid erase counter header and preserved unread,
+	 *  so that what they hold is not destroyed by reclaiming them. */
+	uint32_t corrupt_pebs;
 
 	/**
 	 * Logical erase blocks the volumes may still claim between them.
@@ -253,32 +229,17 @@ enum ubi_state_verdict {
  *        every \c CONFIG_UBI_STATE_CHECK_INTERVAL metadata writes.
  *
  *        This is where rollback detection belongs; \ref ubi_device_info
- *        writes out the rule. When returning #UBI_STATE_TRUSTED, commit the
- *        new values to the trusted store first, because UBI carries on
- *        immediately afterwards.
+ *        writes out the rule. Asking before the write rather than after is
+ *        what lets a refusal be honoured with nothing written, so commit the
+ *        new values to the trusted store before returning
+ *        #UBI_STATE_TRUSTED.
  *
- *        Checking again while the device is mounted is what keeps a long
- *        uptime from being a way around the check. UBI counts the erase
- *        counter headers, volume identifier headers and volume table records
- *        it writes, and asks again before the operation that would take the
- *        count past the interval. Asking beforehand is what lets that
- *        operation be refused with nothing written.
- *
- *        #UBI_STATE_UNTRUSTED is final. The attach that provoked it fails
- *        with \c -EROFS, and on an attached device every operation that
- *        would write returns \c -EROFS from then on; only detaching and
- *        attaching again clears it, which makes carrying on a deliberate act
- *        rather than the result of a retry. Reads and
- *        \ref ubi_device_get_info keep working, so the application can still
- *        report what happened and salvage what it needs before wiping the
- *        device.
+ *        #UBI_STATE_UNTRUSTED is final: every operation that would write
+ *        returns \c -EROFS until the device is attached again. Reads and
+ *        \ref ubi_device_get_info keep working.
  *
  *        Called synchronously with the device lock held. Do not call back
  *        into UBI and do not block.
- *
- *        An application with nowhere trustworthy to keep the counters returns
- *        #UBI_STATE_TRUSTED every time; rollback then goes undetected, but
- *        the decision is visible in the code.
  *
  * \param[in] info                      State of the device as it stands.
  * \param[in] user_context              User context from \ref ubi_config.
@@ -310,30 +271,16 @@ struct ubi_config {
 	 *
 	 * UBI derives its own keys from it with HKDF-SHA256 and never reads,
 	 * copies or stores the material itself. The key must carry
-	 * \c PSA_KEY_USAGE_DERIVE and permit \c PSA_ALG_HKDF(PSA_ALG_SHA_256).
-	 *
-	 * The key must be unique per device. The derivation is salted with a
-	 * 32-bit image sequence number, so a fleet sharing one handle will
-	 * eventually see two devices derive the same key, and a PEB moved
-	 * between them would verify.
+	 * \c PSA_KEY_USAGE_DERIVE, permit \c PSA_ALG_HKDF(PSA_ALG_SHA_256) and
+	 * be unique per device.
 	 */
 	psa_key_id_t ikm_key_id;
 
-	/**
-	 * Integrity event sink. Required.
-	 *
-	 * Ignoring what UBI finds has to be something the application writes
-	 * down, not something it inherits from a zeroed field.
-	 */
+	/** Integrity event sink. Required, so that ignoring what UBI finds is
+	 *  written down rather than inherited from a zeroed field. */
 	ubi_event_cb_t event_cb;
 
-	/**
-	 * Trust check. Required.
-	 *
-	 * Consulted at the end of every attach and periodically afterwards, so
-	 * that an application anchoring rollback counters keeps a say for as
-	 * long as the device is mounted.
-	 */
+	/** Trust check. Required. */
 	ubi_state_cb_t state_cb;
 
 	/** Passed back to both callbacks. */
@@ -425,14 +372,10 @@ size_t ubi_device_size(void);
  * \brief Turn a partition into an empty UBI device.
  *
  *        Destroys any existing content. Writes a fresh image sequence number
- *        and one volume table; it does not erase the whole partition. Blocks
- *        left over from earlier use carry a stale image sequence number, so
- *        UBI treats them as unknown and erases each one lazily, the first
- *        time it is allocated.
- *
- *        Formatting therefore stays fast and restartable even on an 8 MB QSPI
- *        NOR: an interrupted format leaves either no device (\c -ENODEV on
- *        the next attach) or a complete one.
+ *        and one volume table without erasing the whole partition: leftover
+ *        blocks carry a stale image sequence number and are erased lazily,
+ *        the first time each is allocated. An interrupted format therefore
+ *        leaves either no device or a complete one.
  *
  *        Must not be called while the same partition is attached.
  *
@@ -463,10 +406,8 @@ int ubi_device_format(const struct ubi_config *config);
  *        rebuilds the logical-to-physical map in RAM and finally asks the
  *        state callback whether the result is trusted.
  *
- *        This function never writes to or erases the flash. A wrong key
- *        therefore fails every header, returns \c -EBADMSG and leaves the
- *        device untouched; retrying with the correct key succeeds. A rejected
- *        state check leaves it untouched for the same reason.
+ *        Never writes to or erases the flash, so a wrong key or a refused
+ *        state check leaves the device untouched.
  *
  * \param[in,out] ubi                   Storage of \ref ubi_device_size bytes.
  * \param[in] config                    Partition, key handle and callbacks.
@@ -474,8 +415,9 @@ int ubi_device_format(const struct ubi_config *config);
  * \retval 0
  *         Attached.
  * \retval -EINVAL
- *         \p config is malformed, a callback is missing, or the partition
- *         geometry disagrees with the one recorded in the volume table.
+ *         \p config is malformed, a callback is missing, the partition
+ *         geometry disagrees with the one recorded in the volume table, or
+ *         too many blocks are corrupted to carry the device.
  * \retval -EACCES
  *         \p ikm_key_id is missing, or lacks derive permission for
  *         HKDF-SHA256.
@@ -485,7 +427,7 @@ int ubi_device_format(const struct ubi_config *config);
  *         No volume table found: this is not a UBI device. Call
  *         \ref ubi_device_format if that is expected.
  * \retval -EBADMSG
- *         Blocks carry UBI headers whose tags do not verify: the key is wrong,
+ *         Blocks carry UBI headers whose MACs do not verify: the key is wrong,
  *         or the metadata was modified. Distinct from \c -ENODEV on purpose,
  *         because formatting in response would destroy a working device.
  * \retval -ENOSPC
@@ -546,11 +488,8 @@ int ubi_device_get_info(struct ubi_device *ubi, struct ubi_device_info *info);
  *
  *        Reserves \p leb_count logical blocks but allocates no physical ones;
  *        blocks are taken only when a LEB is first mapped or written. The
- *        assigned identifier is never reused, even after the volume is
- *        removed.
- *
- *        The volume table is rewritten atomically, so an interruption leaves
- *        either the old table or the new one.
+ *        assigned identifier is never reused. The volume table is rewritten
+ *        atomically.
  *
  * \param[in,out] ubi                   Attached device.
  * \param[in] config                    Name and size.
@@ -574,18 +513,10 @@ int ubi_volume_create(struct ubi_device *ubi,
 /**
  * \brief Give a volume a new size in logical blocks.
  *
- *        Every volume is dynamic: what \ref ubi_volume_create reserved is a
- *        claim on the shared pool, not a fence. Growing takes more of what is
- *        left of that pool; shrinking hands blocks back to it.
- *
- *        Growing reserves the blocks without allocating any physical ones,
- *        exactly as creating does, and the blocks that appear are unmapped.
- *        Shrinking is refused while any logical block above \p leb_count is
- *        still mapped, so no data is lost to a mistyped size; unmap the tail
- *        first if that is what you meant.
- *
- *        The volume table is rewritten atomically, so an interruption leaves
- *        either the old size or the new one.
+ *        Growing takes more of the shared pool and the blocks that appear are
+ *        unmapped; shrinking hands blocks back. Shrinking is refused while
+ *        any logical block above \p leb_count is still mapped. The volume
+ *        table is rewritten atomically.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume to resize.
@@ -730,11 +661,8 @@ int ubi_leb_unmap(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
  *
  *        What \ref ubi_leb_unmap promises eventually, this promises on
  *        return: the physical block is erased and stamped, so the contents
- *        are gone from the flash and the unmapping survives a reboot. It
- *        costs one erase, which \ref ubi_leb_unmap does not.
- *
- *        Reach for this when the data mattered. Unmapping alone leaves it
- *        readable to anyone holding the part until a reclaim comes round.
+ *        are gone and the unmapping survives a reboot. It costs one erase.
+ *        Reach for it when the data mattered.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
@@ -754,10 +682,9 @@ int ubi_leb_erase(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
 /**
  * \brief Read from a logical erase block.
  *
- *        The hot path: one flash read, no metadata access, no checksums,
- *        because the mapping is already in RAM. Setting
- *        \c CONFIG_UBI_VERIFY_ON_READ adds a header re-read and CMAC check
- *        before every call, at a real cost in throughput.
+ *        One flash read, no metadata access, because the mapping is already
+ *        in RAM. \c CONFIG_UBI_VERIFY_ON_READ adds a header re-read and CMAC
+ *        check before every call.
  *
  *        UBI does not track how much of a LEB has been written. Reading past
  *        the written region, or reading an unmapped LEB, fills \p buffer with
@@ -790,13 +717,9 @@ int ubi_leb_read(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
  * \brief Replace the contents of a logical erase block atomically.
  *
  *        Writes to a freshly allocated physical block and switches the
- *        mapping only once the data is safely down. A power loss at any point
- *        leaves the LEB holding either its previous contents or the new ones,
- *        never a mixture and never a partial write. The old block is queued
- *        for reclaim.
- *
- *        Prefer this whenever a whole block is being rewritten. It costs an
- *        erase only when the free pool has run dry.
+ *        mapping only once the data is safely down, so a power loss leaves
+ *        the LEB holding either its previous contents or the new ones. The
+ *        old block is queued for reclaim.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
@@ -826,29 +749,19 @@ int ubi_leb_change(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 /**
  * \brief Append to a logical erase block at a caller-chosen offset.
  *
- *        A direct write to flash. UBI performs no bookkeeping and promises
- *        nothing beyond placing the bytes where asked; the caller owns the
- *        offset.
+ *        A direct write to flash: UBI places the bytes where asked and
+ *        promises nothing more. The caller owns the offset.
  *
- *        The contract:
  *        - \p offset and \p length must both be multiples of the write block
  *          size reported by \ref ubi_device_get_info.
- *        - An unmapped LEB is mapped on the way, so no \ref ubi_leb_map is
- *          needed first.
+ *        - An unmapped LEB is mapped on the way.
  *        - The same region must never be written twice without an
  *          intervening \ref ubi_leb_change or \ref ubi_leb_unmap. On NOR
- *          flash the second write silently corrupts the first and UBI will
- *          not catch it.
- *        - A power loss mid-append leaves a partial record; detecting that
- *          belongs to the caller.
- *        - UBI stores no length, so nothing distinguishes written bytes from
- *          erased ones and the write frontier is not recovered after a
- *          reboot.
+ *          flash the second write silently corrupts the first.
+ *        - UBI stores no length, so the write frontier is not recovered
+ *          after a reboot and a partial append is the caller's to detect.
  *
- *        Use it for append-only structures such as journals, logs and
- *        key-value stores, where the layer above already tracks a frontier.
- *        For anything else \ref ubi_leb_change is safer and usually just as
- *        fast.
+ *        For anything that is not append-only, \ref ubi_leb_change is safer.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.

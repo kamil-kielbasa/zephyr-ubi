@@ -11,7 +11,9 @@
 # Those headers arrive through -I rather than -isystem, so their static inline
 # functions are diagnosed as if they were ours:
 #
-#   -Wstrict-prototypes  cbprintf.h, which every LOG_ call pulls in, declares\n#                  a function without one.\n#   -Wundef        Kconfig booleans are tested with `#if CONFIG_FOO`, and an
+#   -Wstrict-prototypes  cbprintf.h, which every LOG_ call pulls in, declares
+#                  a function without one.
+#   -Wundef        Kconfig booleans are tested with `#if CONFIG_FOO`, and an
 #                  unset boolean is simply not defined.
 #   -Wconversion   sys_put_le64(), k_uptime_get() and crc32_k_4_2_update() all
 #   -Wsign-...     convert in ways GCC reports. Turn UBI_AUDIT_CONVERSIONS on

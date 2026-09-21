@@ -8,7 +8,7 @@
  *          is decided here; what is written into them is decided a layer up.
  *
  *          The volume table has a volume of its own, reachable through
- *          \ref ubi_volume_by_id but never through the public API, because
+ *          \ref ubi_impl_volume_by_id but never through the public API, because
  *          the record it holds is what declares the others.
  *
  *          Internal to the library: the boundary in ubi_api.c has already
@@ -41,7 +41,8 @@
  *
  * \return The volume, or \c NULL when no volume carries that identifier.
  */
-struct ubi_volume *ubi_volume_by_id(struct ubi_device *ubi, uint32_t vol_id);
+struct ubi_volume *ubi_impl_volume_by_id(struct ubi_device *ubi,
+					 uint32_t vol_id);
 
 /**
  * \brief Report how many logical blocks the volumes may still claim.
@@ -50,7 +51,7 @@ struct ubi_volume *ubi_volume_by_id(struct ubi_device *ubi, uint32_t vol_id);
  *
  * \return Blocks left in the shared pool.
  */
-uint32_t ubi_volumes_leb_free(const struct ubi_device *ubi);
+uint32_t ubi_impl_volumes_leb_free(const struct ubi_device *ubi);
 
 /**
  * \brief Write the volumes as they stand to every copy of the volume table.
@@ -65,7 +66,7 @@ uint32_t ubi_volumes_leb_free(const struct ubi_device *ubi);
  * \retval -EIO
  *         The crypto backend or the flash driver failed.
  */
-int ubi_volumes_rewrite(struct ubi_device *ubi);
+int ubi_impl_volumes_rewrite(struct ubi_device *ubi);
 
 /**
  * \brief Give every volume a record declares its slice of the mapping table.
@@ -82,8 +83,8 @@ int ubi_volumes_rewrite(struct ubi_device *ubi);
  *         The record declares more logical blocks than the partition can
  *         share out.
  */
-int ubi_volumes_build(struct ubi_device *ubi,
-		      const struct ubi_volume_table_record *record);
+int ubi_impl_volumes_build(struct ubi_device *ubi,
+			   const struct ubi_volume_table_record *record);
 
 /**
  * \brief Report which physical block backs a logical one, or
@@ -101,8 +102,8 @@ int ubi_volumes_build(struct ubi_device *ubi,
  * \retval -EINVAL
  *         The volume does not reach that far.
  */
-int ubi_volume_leb_get(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
-		       uint16_t *pnum);
+int ubi_impl_volume_leb_get(struct ubi_device *ubi, uint32_t vol_id,
+			    uint32_t lnum, uint16_t *pnum);
 
 /**
  * \brief Point a logical block at a physical one, with the same contract.
@@ -110,7 +111,8 @@ int ubi_volume_leb_get(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
  * \param lnum                          Logical erase block.
- * \param pnum                          Block to put behind it.
+ * \param pnum                          Block to put behind it, or
+ *                                      #UBI_LEB_UNMAPPED to break the link.
  *
  * \retval 0
  *         Mapped.
@@ -119,8 +121,8 @@ int ubi_volume_leb_get(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
  * \retval -EINVAL
  *         The volume does not reach that far.
  */
-int ubi_volume_leb_set(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
-		       uint16_t pnum);
+int ubi_impl_volume_leb_set(struct ubi_device *ubi, uint32_t vol_id,
+			    uint32_t lnum, uint16_t pnum);
 
 /**
  * \brief Declare a volume and put it in the volume table.
