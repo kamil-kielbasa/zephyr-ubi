@@ -41,9 +41,6 @@ LOG_MODULE_REGISTER(ubi, CONFIG_UBI_LOG_LEVEL);
 /** Only dynamic volumes exist; static ones were dropped by design. */
 #define UBI_VID_TYPE_DYNAMIC (1)
 
-/** Bytes read at a time when checksumming a block's data area. */
-#define DATA_VERIFY_CHUNK (128)
-
 /*
  * Field offsets. Every field Linux UBI interprets sits where Linux puts it;
  * the MAC occupies bytes Linux reserves as padding.

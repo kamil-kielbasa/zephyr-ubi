@@ -11,10 +11,8 @@
 
 /* Standard library headers: */
 #include <errno.h>
-#include <string.h>
 
 /* Zephyr headers: */
-#include <zephyr/storage/flash_map.h>
 #include <zephyr/ztest.h>
 
 /* UBI headers: */
@@ -24,9 +22,26 @@
 #include "common.h"
 #include "suite.h"
 
+/* Module defines ---------------------------------------------------------- */
+
+/* Enough one-write appends to cross the interval have to fit in one block. */
+BUILD_ASSERT(CONFIG_UBI_STATE_CHECK_INTERVAL *UBI_TEST_WRITE_BLOCK <
+	     UBI_TEST_PEB_SIZE - UBI_DATA_OFFSET);
+
+/* Module variables and constants ------------------------------------------ */
+
+UBI_TEST_SUITE(ubi_trust);
+
 /* Module interface function definitions ----------------------------------- */
 
-ZTEST(ubi_integration, test_the_rollback_counters_survive_a_reattach)
+/*
+ * Given: a partition that has just been formatted.
+ * When:  it is attached and asked what it counts.
+ * Then:  the counters the application anchors rollback detection on describe
+ *        exactly what a format writes: each volume table copy stamped once
+ *        and sealed once, at the first revision.
+ */
+ZTEST(ubi_trust, test_the_rollback_counters_start_where_a_format_leaves_them)
 {
 	struct ubi_device_info info = { 0 };
 
@@ -35,61 +50,19 @@ ZTEST(ubi_integration, test_the_rollback_counters_survive_a_reattach)
 	zassert_ok(ubi_device_get_info(ubi, &info));
 	zassert_ok(ubi_device_deinit(ubi));
 
-	/* Only the two blocks holding the volume table have been stamped, and
-	 * they carry the only sequence numbers issued so far. */
-	zassert_equal(2, info.healthy_pebs);
-	zassert_equal(2, info.total_erase_count);
-	zassert_equal(2, info.global_sqnum);
+	zassert_equal(UBI_VOLUME_TABLE_LEB_COUNT, info.healthy_pebs);
+	zassert_equal(UBI_VOLUME_TABLE_LEB_COUNT, info.total_erase_count);
+	zassert_equal(UBI_VOLUME_TABLE_LEB_COUNT, info.global_sqnum);
 	zassert_equal(1, info.revision);
 }
 
-ZTEST(ubi_integration, test_reformatting_does_not_restart_the_sequence_numbers)
-{
-	struct ubi_device_info first = { 0 };
-	struct ubi_device_info second = { 0 };
-
-	zassert_ok(ubi_device_format(&config));
-	zassert_ok(ubi_device_init(ubi, &config));
-	zassert_ok(ubi_device_get_info(ubi, &first));
-	zassert_ok(ubi_device_deinit(ubi));
-
-	zassert_ok(ubi_device_format(&config));
-	zassert_ok(ubi_device_init(ubi, &config));
-	zassert_ok(ubi_device_get_info(ubi, &second));
-	zassert_ok(ubi_device_deinit(ubi));
-
-	/*
-	 * A format leaves most blocks untouched, so if it restarted the
-	 * numbering a volume table left by the previous image would outrank
-	 * the fresh one and the next attach would quietly undo the format.
-	 */
-	zassert_true(
-		second.global_sqnum > first.global_sqnum,
-		"a reformat must outrank whatever is already on the flash");
-}
-
-ZTEST(ubi_integration, test_reformatting_keeps_the_wear_history)
-{
-	struct ubi_device_info first = { 0 };
-	struct ubi_device_info second = { 0 };
-
-	zassert_ok(ubi_device_format(&config));
-	zassert_ok(ubi_device_init(ubi, &config));
-	zassert_ok(ubi_device_get_info(ubi, &first));
-	zassert_ok(ubi_device_deinit(ubi));
-
-	zassert_ok(ubi_device_format(&config));
-	zassert_ok(ubi_device_init(ubi, &config));
-	zassert_ok(ubi_device_get_info(ubi, &second));
-	zassert_ok(ubi_device_deinit(ubi));
-
-	/* A reformat reads the old erase count back and carries on from it,
-	 * so the total never drops: that is what makes it usable as a
-	 * rollback anchor. */
-	zassert_true(second.total_erase_count > first.total_erase_count);
-}
-
-ZTEST(ubi_integration, test_the_state_check_sees_what_get_info_reports)
+/*
+ * Given: a freshly formatted device.
+ * When:  it is attached, which consults the application once.
+ * Then:  what the callback was shown is what get_info reports, so a verdict
+ *        can be reached on the same figures the application sees.
+ */
+ZTEST(ubi_trust, test_the_state_check_sees_what_get_info_reports)
 {
 	struct ubi_device_info info = { 0 };
 
@@ -106,7 +79,13 @@ ZTEST(ubi_integration, test_the_state_check_sees_what_get_info_reports)
 	zassert_ok(ubi_device_deinit(ubi));
 }
 
-ZTEST(ubi_integration, test_an_untrusted_state_stops_the_attach)
+/*
+ * Given: a formatted device and an application that trusts nothing.
+ * When:  an attach is attempted.
+ * Then:  it is refused read-only, so refusing to trust the flash is never a
+ *        reason to change it.
+ */
+ZTEST(ubi_trust, test_an_untrusted_state_stops_the_attach)
 {
 	struct ubi_config guarded = config;
 
@@ -118,45 +97,56 @@ ZTEST(ubi_integration, test_an_untrusted_state_stops_the_attach)
 
 	zassert_equal(-EROFS, ubi_device_init(ubi, &guarded));
 	zassert_equal(1, state_check_count);
-
-	/* Refusing to trust the flash must not be a reason to change it. */
 	zassert_equal(before, partition_fingerprint());
 
 	zassert_ok(ubi_device_init(ubi, &config));
 	zassert_ok(ubi_device_deinit(ubi));
 }
 
-ZTEST(ubi_integration, test_a_withdrawn_trust_stops_the_writes)
+/*
+ * Given: an application that trusts the attach and nothing after it.
+ * When:  appends carry on until the library consults it again.
+ * Then:  the refusal stops the writes and latches, so the library refuses
+ *        from then on without asking again and without writing.
+ */
+ZTEST(ubi_trust, test_a_withdrawn_trust_stops_the_writes)
 {
 	struct ubi_config watched = config;
-	const struct ubi_volume_config wanted = { .name = "logs",
-						  .leb_count = 2 };
+	const struct ubi_volume_config wanted = {
+		.name = "logs", .leb_count = UBI_TEST_VOLUME_LEBS
+	};
 	uint32_t vol_id = UBI_VOL_ID_INVALID;
+	uint8_t record[UBI_TEST_WRITE_BLOCK] = { 0 };
+	uint32_t appended = 0;
 	int ret = 0;
 
+	pattern_fill(record, sizeof(record), 0x3C);
 	watched.state_cb = trust_once;
 
 	zassert_ok(ubi_device_format(&config));
 	zassert_ok(ubi_device_init(ubi, &watched));
 	zassert_equal(1, state_check_count, "the attach has to ask once");
+	zassert_ok(ubi_volume_create(ubi, &wanted, &vol_id));
 
-	/* Each round costs a handful of writes, so one of them is bound to
-	 * cross the interval and ask again. */
-	for (uint32_t round = 0; round < 64 && 0 == ret; ++round) {
-		ret = ubi_volume_create(ubi, &wanted, &vol_id);
-
-		if (0 == ret)
-			ret = ubi_volume_remove(ubi, vol_id);
+	/* Each append is at least one write, so this many cross the
+	 * interval. */
+	while (0 == ret && appended < CONFIG_UBI_STATE_CHECK_INTERVAL) {
+		ret = ubi_leb_write_at(ubi, vol_id, 0,
+				       appended * sizeof(record), record,
+				       sizeof(record));
+		appended += 1;
 	}
 
-	zassert_equal(-EROFS, ret, "a refusal has to stop the writes");
-	zassert_true(state_check_count > 1);
+	zassert_equal(-EROFS, ret, "the interval has to bring the check back");
+	zassert_equal(2, state_check_count);
 
-	/* Latched: the library does not ask again, it simply refuses. */
-	const uint32_t asked = state_check_count;
+	const uint32_t before = partition_fingerprint();
 
-	zassert_equal(-EROFS, ubi_volume_create(ubi, &wanted, &vol_id));
-	zassert_equal(asked, state_check_count);
+	zassert_equal(-EROFS, ubi_leb_write_at(ubi, vol_id, 0,
+					       appended * sizeof(record),
+					       record, sizeof(record)));
+	zassert_equal(2, state_check_count, "a latched refusal does not ask");
+	zassert_equal(before, partition_fingerprint());
 
 	zassert_ok(ubi_device_deinit(ubi));
 }

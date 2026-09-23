@@ -1,40 +1,35 @@
 # Copyright (c) 2026 Kamil Kiełbasa
 # SPDX-License-Identifier: MIT
 
-# =============================================================================
-# ubi_target_warnings(<target>)
-#
-# Diagnostics for the library's own translation units. All flags are PRIVATE,
-# so nothing here reaches an application that merely uses UBI.
-#
-# The set is the one libedhoc uses, minus what Zephyr's headers cannot survive.
-# Those headers arrive through -I rather than -isystem, so their static inline
-# functions are diagnosed as if they were ours:
-#
-#   -Wstrict-prototypes  cbprintf.h, which every LOG_ call pulls in, declares
-#                  a function without one.
-#   -Wundef        Kconfig booleans are tested with `#if CONFIG_FOO`, and an
-#                  unset boolean is simply not defined.
-#   -Wconversion   sys_put_le64(), k_uptime_get() and crc32_k_4_2_update() all
-#   -Wsign-...     convert in ways GCC reports. Turn UBI_AUDIT_CONVERSIONS on
-#                  to read them; they cannot be errors.
-# =============================================================================
-
-option(UBI_AUDIT_CONVERSIONS
-       "Warn about implicit conversions, Zephyr's own headers included" OFF)
+option(UBI_AUDIT_CONVERSIONS "Report implicit conversions without failing" OFF)
 
 function(ubi_target_warnings target)
   set(base
     -Werror -Wall -Wextra
-    -Wcast-align -Wdouble-promotion
-    -Wformat=2 -Wunreachable-code
-    -Wmissing-prototypes -Wold-style-definition
-    -Wshadow -Wpointer-arith -Wuninitialized
-    -Wnull-dereference -Wswitch-enum -Wswitch-default)
+    -Walloca -Wdate-time -Wdouble-promotion -Wfloat-conversion -Wfloat-equal
+    -Wformat-nonliteral -Wformat-security -Wformat-y2k -Wmissing-declarations
+    -Wmissing-format-attribute -Wmissing-noreturn -Wmissing-prototypes
+    -Wmultichar -Wnull-dereference -Wold-style-definition -Woverlength-strings
+    -Wpointer-arith -Wshadow -Wswitch-default -Wswitch-enum -Wuninitialized
+    -Wunreachable-code -Wunused-macros -Wwrite-strings)
 
   set(base_gcc
-    -Wduplicated-cond -Wduplicated-branches -Wlogical-op -Winit-self
-    -Wjump-misses-init)
+    -Waggregate-return -Walloc-zero -Warray-bounds=2 -Wattribute-alias=2
+    -Wdisabled-optimization -Wduplicated-cond -Wformat-overflow=2
+    -Wformat-signedness -Wformat-truncation=2 -Wimplicit-fallthrough=5
+    -Winit-self -Wjump-misses-init -Wlogical-op -Wshift-overflow=2
+    -Wstringop-overflow=4 -Wtrampolines -Wunused-const-variable=2)
+
+  set(base_clang
+    -Wno-unknown-warning-option
+    -Warray-bounds-pointer-arithmetic -Wassign-enum -Wbad-function-cast
+    -Wcast-function-type-strict -Wcomma -Wcompound-token-split
+    -Wconditional-uninitialized -Wduplicate-enum -Wfour-char-constants
+    -Wformat-non-iso -Wformat-pedantic -Widiomatic-parentheses
+    -Wimplicit-fallthrough -Wloop-analysis -Wnewline-eof -Wredundant-parens
+    -Wshadow-all -Wshift-sign-overflow -Wsigned-enum-bitfield
+    -Wstatic-in-inline -Wstring-conversion -Wunreachable-code-aggressive
+    -Wzero-length-array)
 
   if(UBI_AUDIT_CONVERSIONS)
     list(APPEND base -Wconversion -Wsign-conversion
@@ -44,6 +39,6 @@ function(ubi_target_warnings target)
   if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     target_compile_options(${target} PRIVATE ${base} ${base_gcc})
   elseif(CMAKE_C_COMPILER_ID MATCHES "Clang")
-    target_compile_options(${target} PRIVATE ${base})
+    target_compile_options(${target} PRIVATE ${base} ${base_clang})
   endif()
 endfunction()

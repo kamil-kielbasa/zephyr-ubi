@@ -59,6 +59,11 @@
 /** Linux UBI's 31-bit bound. The flash field is 64-bit, the RAM copy 32-bit. */
 #define UBI_MAX_ERASE_COUNT (0x7FFFFFFFUL)
 
+/** Share of the partition that may be corrupted before attach gives up,
+ *  and the floor Linux UBI applies to it on a small partition. */
+#define CORRUPT_PEB_SHARE (20)
+#define CORRUPT_PEB_FLOOR (8)
+
 /* Types and type definitions ---------------------------------------------- */
 
 /**

@@ -47,11 +47,6 @@ LOG_MODULE_DECLARE(ubi, CONFIG_UBI_LOG_LEVEL);
 /** Bytes read at a time when looking for anything left in a data area. */
 #define SCAN_CHUNK (128)
 
-/** Share of the partition that may be corrupted before attach gives up,
- *  and the floor Linux UBI applies to it on a small partition. */
-#define CORRUPT_PEB_SHARE (20)
-#define CORRUPT_PEB_FLOOR (8)
-
 BUILD_ASSERT(UBI_LEB_UNMAPPED == UINT16_MAX,
 	     "the unmapped sentinel must be all ones, so that memset sets it");
 

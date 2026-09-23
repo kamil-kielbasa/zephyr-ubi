@@ -16,6 +16,7 @@ manifest:
       import:
         name-allowlist:
           - cmsis
+          - cmsis_6
           - hal_nordic
           - mbedtls
           - tf-psa-crypto

@@ -1,7 +1,5 @@
 tests:
-  # The stock simulator: one byte per write, so nothing has to be aligned or
-  # padded. Every other scenario exists because that is not what real parts
-  # do.
+  # The stock simulator: 4 KiB pages, single-byte writes.
   ubi.integration:
     platform_allow:
       - native_sim
@@ -9,22 +7,29 @@ tests:
       - ubi
     integration_platforms:
       - native_sim
+  # Geometries of real parts, each with its own write granularity.
   ubi.integration.nrf5340:
     platform_allow:
       - native_sim
     tags:
       - ubi
     extra_args:
-      - EXTRA_DTC_OVERLAY_FILE=nrf5340.overlay
+      - DTC_OVERLAY_FILE=native_sim/nrf5340_flash.overlay
   ubi.integration.stm32u5:
     platform_allow:
       - native_sim
     tags:
       - ubi
     extra_args:
-      - EXTRA_DTC_OVERLAY_FILE=stm32u5.overlay
-  # The two switches that change what the library does rather than what the
-  # flash underneath it looks like.
+      - DTC_OVERLAY_FILE=native_sim/stm32u5_flash.overlay
+  ubi.integration.mx25r64:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_args:
+      - DTC_OVERLAY_FILE=native_sim/mx25r64_flash.overlay
+  # Switches that change what the library does.
   ubi.integration.verify_on_read:
     platform_allow:
       - native_sim
@@ -39,3 +44,72 @@ tests:
       - ubi
     extra_configs:
       - CONFIG_UBI_SELF_CHECKS=y
+  # The ends of two ranges.
+  ubi.integration.eager_state_check:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_STATE_CHECK_INTERVAL=1
+  ubi.integration.no_protection:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_PROTECTION_CYCLES=0
+  # The nRF5340 DK's MX25R64, all 8 MiB. Tests that need the simulator's
+  # counters or injected faults are not built here.
+  ubi.integration.hardware:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 7200
+  ubi.integration.hardware.64k:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 7200
+    extra_configs:
+      - CONFIG_NORDIC_QSPI_NOR_FLASH_LAYOUT_PAGE_SIZE=65536
+  ubi.integration.hardware.verify_on_read:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 7200
+    extra_configs:
+      - CONFIG_UBI_VERIFY_ON_READ=y
+  ubi.integration.hardware.self_checks:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 7200
+    extra_configs:
+      - CONFIG_UBI_SELF_CHECKS=y
+  ubi.integration.hardware.eager_state_check:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 7200
+    extra_configs:
+      - CONFIG_UBI_STATE_CHECK_INTERVAL=1
+  ubi.integration.hardware.no_protection:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 7200
+    extra_configs:
+      - CONFIG_UBI_PROTECTION_CYCLES=0

@@ -1,0 +1,22 @@
+/*
+ * Copyright (c) 2026 Kamil Kiełbasa
+ * SPDX-License-Identifier: MIT
+ *
+ * The whole MX25R64, 8 MiB. The DK gives it no partitions, and the label
+ * storage_partition belongs to the internal flash.
+ */
+
+&mx25r64 {
+	status = "okay";
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		ubi_partition: partition@0 {
+			label = "ubi-storage";
+			reg = <0x00000000 0x00800000>;
+		};
+	};
+};

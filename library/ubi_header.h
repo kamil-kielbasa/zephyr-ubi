@@ -58,6 +58,9 @@
 /** Offset at which block data begins. */
 #define UBI_DATA_OFFSET (128)
 
+/** Bytes read at a time when checksumming a block's data area. */
+#define DATA_VERIFY_CHUNK (128)
+
 /**
  * Header format understood by this implementation.
  *

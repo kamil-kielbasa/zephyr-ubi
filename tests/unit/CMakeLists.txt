@@ -6,6 +6,8 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
 project(ubi_unit)
 
+include(${ZEPHYR_UBI_MODULE_DIR}/cmake/warnings.cmake)
+
 target_sources(app PRIVATE
   src/common.c
   src/suite.c
@@ -14,7 +16,7 @@ target_sources(app PRIVATE
   src/test_mac.c
 )
 
-# Header serialization and key derivation have no public API of their own, so
-# the unit tests reach them through the library's internal header. No test
-# hooks are added to the library itself.
+# Header serialization and key derivation have no public API of their own.
 target_include_directories(app PRIVATE ${ZEPHYR_UBI_MODULE_DIR}/library)
+
+ubi_target_warnings(app)
