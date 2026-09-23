@@ -1,0 +1,25 @@
+# Copyright (c) 2026 Kamil Kiełbasa
+# SPDX-License-Identifier: MIT
+#
+# Manifest for building zephyr-ubi standalone. Consumers that already have a
+# west workspace should instead add this repository to their own manifest.
+
+manifest:
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.4.0
+      import:
+        name-allowlist:
+          - cmsis
+          - cmsis_6
+          - hal_nordic
+          - mbedtls
+          - tf-psa-crypto
+
+  self:
+    path: zephyr-ubi

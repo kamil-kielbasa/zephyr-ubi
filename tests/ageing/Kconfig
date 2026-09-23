@@ -1,0 +1,29 @@
+# Copyright (c) 2026 Kamil Kiełbasa
+# SPDX-License-Identifier: MIT
+
+mainmenu "UBI ageing tests"
+
+config UBI_TEST_LIFETIME_ROUNDS
+	int "Rewrites in the lifetime tests"
+	default 32768
+	help
+	  Rewrites of one logical block in the levelling test, its control
+	  without levelling, and the check of the wear against the flash.
+	  Every block has to take its turn, so this grows with the partition
+	  and with the wear levelling threshold.
+
+config UBI_TEST_CHOICE_ROUNDS
+	int "Rewrites in each phase of the choice test"
+	default 8192
+	help
+	  Rewrites that leave a block part-worn, and as many again that make
+	  it worth relocating next to a barely used one.
+
+config UBI_TEST_PROTECTION_ROUNDS
+	int "Rewrites in each phase of the protection test"
+	default 8192
+	help
+	  Rewrites that wear the hot blocks before fresh ones arrive, and as
+	  many again with levelling on.
+
+source "Kconfig.zephyr"

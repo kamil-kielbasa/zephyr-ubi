@@ -1,0 +1,25 @@
+/*
+ * Copyright (c) 2026 Kamil Kiełbasa
+ * SPDX-License-Identifier: MIT
+ *
+ * native_sim with the geometry of the MX25R64 as nrf_qspi_nor drives it by
+ * default: 64 KiB pages, 4 bytes per write. UBI gets 8 MiB of a flash grown
+ * to 16 MiB.
+ */
+
+&flashcontroller0 {
+	reg = <0x00000000 0x01000000>;
+};
+
+&flash0 {
+	reg = <0x00000000 0x01000000>;
+	erase-block-size = <65536>;
+	write-block-size = <4>;
+
+	partitions {
+		ubi_partition: partition@100000 {
+			label = "ubi-storage";
+			reg = <0x00100000 0x00800000>;
+		};
+	};
+};
