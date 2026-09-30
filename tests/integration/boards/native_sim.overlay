@@ -1,0 +1,21 @@
+/*
+ * Copyright (c) 2026 Kamil Kiełbasa
+ * SPDX-License-Identifier: MIT
+ *
+ * 8 MiB, the size of the nRF5340 DK's MX25R64, on a flash grown to 16 MiB.
+ */
+
+&flashcontroller0 {
+	reg = <0x00000000 0x01000000>;
+};
+
+&flash0 {
+	reg = <0x00000000 0x01000000>;
+
+	partitions {
+		ubi_partition: partition@100000 {
+			label = "ubi-storage";
+			reg = <0x00100000 0x00800000>;
+		};
+	};
+};

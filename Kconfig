@@ -1,0 +1,104 @@
+# Copyright (c) 2026 Kamil Kiełbasa
+# SPDX-License-Identifier: MIT
+
+menuconfig UBI
+        bool "Unsorted Block Images (UBI)"
+        select FLASH
+        select FLASH_MAP
+        select CRC
+        select PSA_WANT_ALG_CMAC
+        select PSA_WANT_ALG_HKDF
+        select PSA_WANT_ALG_SHA_256
+        select PSA_WANT_KEY_TYPE_AES
+        select PSA_WANT_KEY_TYPE_DERIVE
+        help
+          Volume manager for raw flash: maps logical erase blocks onto
+          physical ones, spreads wear, survives power loss and authenticates
+          its own metadata with AES-CMAC. Application data is neither
+          encrypted nor authenticated.
+
+if UBI
+
+config UBI_MAX_NR_OF_VOLUMES
+        int "Maximum number of volumes"
+        default 4
+        range 1 64
+        help
+          Volumes one device can hold. A build that allows fewer than a
+          device holds refuses it with -ENOTSUP, so raise this across an
+          update, never lower it.
+
+config UBI_WEAR_LEVELING_THRESHOLD
+        int "Erase count spread that makes relocation worthwhile"
+        default 256
+        range 64 512
+        help
+          A block in use this many erases below the free block it would move
+          onto is worth relocating. Writes take the most worn free block
+          within this many erases of the least worn one, relocation within
+          twice as many. Lower values wear more evenly and copy more.
+
+config UBI_PROTECTION_CYCLES
+        int "Erases a freshly allocated block is left alone for"
+        default 64
+        range 0 255
+        help
+          Relocation leaves a freshly allocated block alone for this many
+          erases anywhere on the device, as its data is likely to be
+          rewritten soon. Zero turns this off. Kept in RAM, so every block
+          starts unprotected at attach. Below 16, relocation can end up
+          chasing the most often rewritten data.
+
+config UBI_STATE_CHECK_INTERVAL
+        int "Flash writes between state checks"
+        default 64
+        range 1 1024
+        help
+          The state callback is consulted at attach and, once this many flash
+          writes have gone by, before the next operation that writes.
+
+config UBI_ERASE_INVALIDATES_HEADERS
+        bool "Clear the header magics before every erase"
+        default y
+        help
+          An erase cut short can leave a block's headers intact while part of
+          its data is gone. Zeroing the magic of each header before the erase
+          makes the next attach erase such a block rather than take it back.
+
+          Needs flash that accepts a second write over programmed bytes. Turn
+          it off on flash with ECC or a write-once rule; left on there, the
+          first refused write is logged and erases carry on without it until
+          the next attach.
+
+config UBI_IO_CHUNK_SIZE
+        int "Bytes read or copied at a time"
+        default 128
+        range 64 4096
+        help
+          Attach, relocation and data checks go through the flash in pieces
+          of this size, held on the stack of the calling thread. Must be a
+          multiple of 64. Larger pieces take fewer flash transactions and
+          more stack.
+
+config UBI_VERIFY_ON_READ
+        bool "Verify the VID header before every read"
+        help
+          Every ubi_leb_read() re-reads and authenticates the volume
+          identifier header and checks that it names the block being read.
+          Guards against tampering at run time, at the cost of a flash read
+          and a CMAC per call. Data checksums are checked at attach only.
+
+config UBI_SELF_CHECKS
+        bool "Check the library's own bookkeeping at run time"
+        help
+          After every call, checks that every mapped logical block names a
+          physical block in use and every physical block in use backs exactly
+          one logical block; also checks allocation and relocation choices.
+          Takes a bitmap of one bit per block from the heap at attach. Meant
+          for tests and bring-up.
+
+module = UBI
+module-str = ubi
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # UBI

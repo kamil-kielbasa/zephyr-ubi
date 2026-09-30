@@ -1,0 +1,24 @@
+/*
+ * Copyright (c) 2026 Kamil Kiełbasa
+ * SPDX-License-Identifier: MIT
+ *
+ * native_sim with the geometry of the nRF5340 internal flash: 4 KiB pages,
+ * 8 bytes per write. UBI gets 8 MiB of a flash grown to 16 MiB.
+ */
+
+&flashcontroller0 {
+	reg = <0x00000000 0x01000000>;
+};
+
+&flash0 {
+	reg = <0x00000000 0x01000000>;
+	erase-block-size = <4096>;
+	write-block-size = <8>;
+
+	partitions {
+		ubi_partition: partition@100000 {
+			label = "ubi-storage";
+			reg = <0x00100000 0x00800000>;
+		};
+	};
+};

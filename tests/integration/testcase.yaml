@@ -1,0 +1,165 @@
+common:
+  # The power-loss sweeps outlast twister's default minute under the
+  # sanitizers.
+  timeout: 300
+tests:
+  # The stock simulator: 4 KiB pages, single-byte writes.
+  ubi.integration:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    integration_platforms:
+      - native_sim
+  # Geometries of real parts, each with its own write granularity.
+  ubi.integration.nrf5340:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_args:
+      - DTC_OVERLAY_FILE=native_sim/nrf5340_flash.overlay
+  ubi.integration.stm32u5:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_args:
+      - DTC_OVERLAY_FILE=native_sim/stm32u5_flash.overlay
+  ubi.integration.mx25r64:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_args:
+      - DTC_OVERLAY_FILE=native_sim/mx25r64_flash.overlay
+  # The widest write block UBI takes.
+  ubi.integration.wide_write:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_args:
+      - DTC_OVERLAY_FILE=native_sim/wide_write_flash.overlay
+  # Switches that change what the library does.
+  ubi.integration.verify_on_read:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_VERIFY_ON_READ=y
+  ubi.integration.self_checks:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_SELF_CHECKS=y
+  ubi.integration.erase_keeps_headers:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_ERASE_INVALIDATES_HEADERS=n
+  # The ends of two ranges.
+  ubi.integration.eager_state_check:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_STATE_CHECK_INTERVAL=1
+  ubi.integration.no_protection:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_PROTECTION_CYCLES=0
+  # A volume table record that ends off a header boundary, and the largest
+  # one a build can have.
+  ubi.integration.odd_volumes:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_MAX_NR_OF_VOLUMES=3
+  ubi.integration.most_volumes:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_MAX_NR_OF_VOLUMES=64
+  # The flash read and copied in the smallest pieces, and a block at a time.
+  ubi.integration.small_chunks:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_IO_CHUNK_SIZE=64
+  ubi.integration.large_chunks:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    extra_configs:
+      - CONFIG_UBI_IO_CHUNK_SIZE=4096
+  # The nRF5340 DK's MX25R64, all 8 MiB. Tests that need the simulator's
+  # counters or injected faults are not built here.
+  ubi.integration.hardware:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 7200
+  ubi.integration.hardware.64k:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 7200
+    extra_configs:
+      - CONFIG_NORDIC_QSPI_NOR_FLASH_LAYOUT_PAGE_SIZE=65536
+  ubi.integration.hardware.verify_on_read:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 7200
+    extra_configs:
+      - CONFIG_UBI_VERIFY_ON_READ=y
+  ubi.integration.hardware.self_checks:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 7200
+    extra_configs:
+      - CONFIG_UBI_SELF_CHECKS=y
+  ubi.integration.hardware.eager_state_check:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 7200
+    extra_configs:
+      - CONFIG_UBI_STATE_CHECK_INTERVAL=1
+  ubi.integration.hardware.no_protection:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 7200
+    extra_configs:
+      - CONFIG_UBI_PROTECTION_CYCLES=0

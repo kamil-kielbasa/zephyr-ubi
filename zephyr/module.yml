@@ -1,0 +1,4 @@
+name: ubi
+build:
+  cmake: .
+  kconfig: Kconfig

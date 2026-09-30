@@ -1,0 +1,25 @@
+tests:
+  # Levelling shows only over a lifetime of rewrites; erases are free here.
+  ubi.ageing:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    slow: true
+    timeout: 600
+    integration_platforms:
+      - native_sim
+  # Real flash, 87 ms an erase. Validated on the simulator with this
+  # geometry and threshold; 1536, 384 and 512 rounds fail.
+  ubi.ageing.hardware:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 1500
+    extra_configs:
+      - CONFIG_UBI_WEAR_LEVELING_THRESHOLD=64
+      - CONFIG_UBI_TEST_LIFETIME_ROUNDS=1792
+      - CONFIG_UBI_TEST_CHOICE_ROUNDS=768
+      - CONFIG_UBI_TEST_PROTECTION_ROUNDS=768

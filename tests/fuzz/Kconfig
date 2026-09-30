@@ -1,0 +1,27 @@
+# Copyright (c) 2026 Kamil Kiełbasa
+# SPDX-License-Identifier: MIT
+
+mainmenu "UBI fuzz target"
+
+config ARCH_POSIX_FUZZ_IRQ
+	int "Interrupt the inputs arrive through"
+	default 31
+	help
+	  libFuzzer hands each input over by raising this interrupt, as in
+	  Zephyr's fuzz sample. Nothing else may use it.
+
+config ARCH_POSIX_FUZZ_TICKS
+	int "Ticks one input may take"
+	default 2
+	help
+	  Simulated time the target gets to decode one input and fall idle.
+
+config UBI_TEST_FUZZ_REPORT_EVERY
+	int "Inputs between two progress lines"
+	default 200000
+	help
+	  The run is judged by the first such line: reaching it means that
+	  many inputs went through every decoder without a crash, a sanitizer
+	  report or a broken round trip.
+
+source "Kconfig.zephyr"

@@ -1,0 +1,28 @@
+# Copyright (c) 2026 Kamil Kiełbasa
+# SPDX-License-Identifier: MIT
+
+mainmenu "UBI model test"
+
+config UBI_TEST_MODEL_STEPS
+	int "Operations in one run"
+	default 20000
+	help
+	  Operations picked at random and checked against the model. A
+	  reattach is one of them.
+
+config UBI_TEST_MODEL_SEED
+	hex "Seed of the operations picked"
+	default 0x5eed1e55
+	help
+	  The same seed on the same geometry picks the same operations, so a
+	  failing run can be repeated.
+
+config UBI_TEST_MODEL_FAULT_PERCENT
+	int "Share of operations cut short, in percent"
+	default 10
+	range 0 100
+	help
+	  Operations cut short by a power loss or by a failed write, which only
+	  the flash simulator can inject.
+
+source "Kconfig.zephyr"
