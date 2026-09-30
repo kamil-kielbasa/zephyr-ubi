@@ -1,0 +1,17 @@
+tests:
+  # Everything UBI decodes off the flash, under libFuzzer, AddressSanitizer
+  # and UndefinedBehaviorSanitizer. Passes once enough inputs went through.
+  ubi.fuzz:
+    toolchain_allow:
+      - host/llvm
+      - llvm
+    platform_allow:
+      - native_sim/native/64
+    tags:
+      - ubi
+    timeout: 900
+    harness: console
+    harness_config:
+      type: one_line
+      regex:
+        - "fuzzed [0-9]+ inputs"

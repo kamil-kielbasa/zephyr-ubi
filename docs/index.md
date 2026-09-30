@@ -2,9 +2,9 @@
 layout: home
 
 hero:
-  name: zephyr-ubi
-  text: UBI for Zephyr
-  tagline: A volume manager for raw NOR flash, with wear levelling, power-loss safety and authenticated metadata.
+  name: UBI for Zephyr
+  text: Volumes on raw flash
+  tagline: Wear levelling, power-loss safety and authenticated metadata, as a Zephyr module.
   actions:
     - theme: brand
       text: How it works
@@ -15,7 +15,7 @@ hero:
 
 features:
   - title: What it does
-    details: Volumes on raw NOR flash, atomic block updates, appends, and wear levelling that runs when the application asks for it.
+    details: Named volumes, atomic block updates, appends, and wear levelling that runs when the application asks for it.
     link: /how-it-works
     linkText: How it works
   - title: Security
@@ -23,7 +23,7 @@ features:
     link: /security
     linkText: Threat model
   - title: Examples
-    details: Adding the module, a first volume, appending records and keeping maintenance up.
+    details: Adding the module, attaching, volumes, appends, key provisioning and maintenance.
     link: /examples
     linkText: Code
 ---

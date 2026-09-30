@@ -1,0 +1,13 @@
+tests:
+  # Stack use means nothing on native_sim, whose threads run on the host's
+  # stack. mps2/an521/cpu0 is Arm's MPS2+ board with the AN521 image, core 0
+  # of a Cortex-M33, which QEMU emulates, so CI measures it with no hardware.
+  ubi.stack:
+    platform_allow:
+      - mps2/an521/cpu0
+      - nrf5340dk/nrf5340/cpuapp
+    integration_platforms:
+      - mps2/an521/cpu0
+    tags:
+      - ubi
+    timeout: 600

@@ -1,7 +1,7 @@
 {
   "name": "zephyr-ubi",
   "version": "0.1.0",
-  "description": "A volume manager for raw NOR flash, built as a Zephyr module",
+  "description": "A volume manager for raw flash, built as a Zephyr module",
   "license": "MIT",
   "scripts": {
     "docs:dev": "vitepress dev docs",
@@ -9,6 +9,7 @@
     "docs:preview": "vitepress preview docs"
   },
   "devDependencies": {
+    "mermaid": "^11.17.2",
     "vitepress": "2.0.0-alpha.20"
   }
 }

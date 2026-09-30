@@ -19,7 +19,7 @@
 #include "ubi_key.h"
 
 /* Test headers: */
-#include "common.h"
+#include "keys.h"
 #include "suite.h"
 
 /* Module variables and constants ------------------------------------------ */
@@ -27,6 +27,18 @@
 psa_key_id_t ikm_key;
 psa_key_id_t key_header;
 psa_key_id_t key_volume_table;
+
+/* Static function declarations -------------------------------------------- */
+
+/**
+ * \brief Bring up the crypto backend and derive the keys every test uses.
+ */
+static void *suite_setup(void);
+
+/**
+ * \brief Destroy them.
+ */
+static void suite_teardown(void *fixture);
 
 /* Static function definitions --------------------------------------------- */
 
@@ -36,8 +48,8 @@ static void *suite_setup(void)
 
 	ikm_key = import_ikm(test_ikm, sizeof(test_ikm), PSA_KEY_USAGE_DERIVE);
 
-	zassert_ok(
-		ubi_impl_key_derive(ikm_key, &key_header, &key_volume_table));
+	zassert_ok(ubi_impl_key_derive(ikm_key, NULL, 0, &key_header,
+				       &key_volume_table));
 
 	return NULL;
 }

@@ -4,9 +4,7 @@
  * \brief   Physical access to the managed partition.
  *
  *          The one place where a physical erase block number becomes a flash
- *          offset, and therefore the one place where that number has to be
- *          checked. Everything above works in block numbers and offsets
- *          within a block, and nothing above calls the flash API directly.
+ *          offset, and is checked.
  *
  * \copyright Copyright (c) 2026
  *
@@ -87,12 +85,8 @@ int ubi_impl_io_write(struct ubi_device *ubi, uint32_t pnum, uint32_t offset,
 int ubi_impl_io_erase(const struct ubi_device *ubi, uint32_t pnum);
 
 /**
- * \brief Read from the data area, counting the offset from where the data
- *        begins rather than from the start of the block.
- *
- *        Same arguments and same returns as \ref ubi_impl_io_read otherwise.
- *        Linux UBI keeps the same pair for the same reason: the two headers
- *        in front of the data are nobody else's business.
+ * \brief Read from the data area, the offset counted from where the data
+ *        begins. Otherwise as \ref ubi_impl_io_read.
  */
 static inline int ubi_impl_io_read_data(const struct ubi_device *ubi,
 					uint32_t pnum, uint32_t offset,
@@ -103,7 +97,7 @@ static inline int ubi_impl_io_read_data(const struct ubi_device *ubi,
 }
 
 /**
- * \brief Write to the data area, counting the offset the same way.
+ * \brief Write to the data area, the offset counted the same way.
  */
 static inline int ubi_impl_io_write_data(struct ubi_device *ubi, uint32_t pnum,
 					 uint32_t offset, const uint8_t *buffer,

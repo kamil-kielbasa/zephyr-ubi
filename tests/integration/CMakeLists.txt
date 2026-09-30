@@ -9,21 +9,38 @@ project(ubi_integration)
 include(${ZEPHYR_UBI_MODULE_DIR}/cmake/warnings.cmake)
 
 target_sources(app PRIVATE
-  ../common/common.c
+  ../common/forge.c
+  ../common/partition.c
   ../common/suite.c
+  ../common/table_copies.c
   src/test_attach.c
   src/test_concurrency.c
   src/test_contract.c
-  src/test_integrity.c
+  src/test_integrity_block.c
+  src/test_integrity_table.c
   src/test_leb.c
+  src/test_leb_copies.c
   src/test_maintenance.c
+  src/test_relocation.c
   src/test_trust.c
   src/test_volume.c
+  src/test_volume_resize.c
+  src/workload.c
 )
 
-# Reads the flash simulator's operation counters.
+# Reads the flash simulator's operation counters and injects its faults.
 if(CONFIG_FLASH_SIMULATOR)
-  target_sources(app PRIVATE src/test_cost.c)
+  target_sources(app PRIVATE
+    ../common/flash_faults.c
+    ../common/flash_shim.c
+    ../common/flash_stats.c
+    src/sweep.c
+    src/test_cost.c
+    src/test_erase_failure.c
+    src/test_power_loss_device.c
+    src/test_power_loss_leb.c
+    src/test_write_failure.c
+  )
 endif()
 
 # The on-flash layout and key derivation, for tests that forge blocks.

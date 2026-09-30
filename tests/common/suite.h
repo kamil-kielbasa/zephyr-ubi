@@ -66,10 +66,10 @@ extern struct ubi_config config_wrong_key;
 extern uint32_t events_total;
 
 /** Events reported during the current test, by \ref ubi_event_type. */
-extern uint32_t event_count[UBI_EVENT_PEB_BAD + 1];
+extern uint32_t event_count[UBI_EVENT_DATA_CORRUPT + 1];
 
 /** The last event of each kind. */
-extern struct ubi_event event_last[UBI_EVENT_PEB_BAD + 1];
+extern struct ubi_event event_last[UBI_EVENT_DATA_CORRUPT + 1];
 
 /** How many times the library asked for a verdict. */
 extern uint32_t state_check_count;
@@ -144,6 +144,17 @@ void pattern_fill(uint8_t *buffer, size_t length, uint8_t seed);
  *        \p seed holds, so no two blocks of it read alike.
  */
 void leb_payload(uint8_t seed, uint32_t lnum, uint8_t *buffer, size_t length);
+
+/**
+ * \brief Write leb_payload() of \p seed into blocks \p from to \p to - 1.
+ */
+void volume_fill(uint32_t vol_id, uint32_t from, uint32_t to, uint8_t seed);
+
+/**
+ * \brief Fail unless blocks \p from to \p to - 1 hold what volume_fill()
+ *        wrote from \p seed.
+ */
+void volume_check(uint32_t vol_id, uint32_t from, uint32_t to, uint8_t seed);
 
 /**
  * \brief Format, attach and fill a volume that leaves only

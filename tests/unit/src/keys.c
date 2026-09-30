@@ -1,7 +1,7 @@
 /**
- * \file    common.c
+ * \file    keys.c
  * \author  Kamil Kielbasa
- * \brief   Fixed inputs and the few helpers the unit tests share.
+ * \brief   Keying material and key helpers the unit tests share.
  *
  * \copyright Copyright (c) 2026
  *
@@ -10,19 +10,16 @@
 /* Include files ----------------------------------------------------------- */
 
 /* Zephyr headers: */
-#include <zephyr/sys/byteorder.h>
-#include <zephyr/sys/crc.h>
 #include <zephyr/ztest.h>
 
 /* PSA headers: */
 #include <psa/crypto.h>
 
 /* UBI headers: */
-#include "ubi_header.h"
 #include "ubi_key.h"
 
 /* Test headers: */
-#include "common.h"
+#include "keys.h"
 
 /* Module variables and constants ------------------------------------------ */
 
@@ -30,10 +27,6 @@ const uint8_t test_ikm[32] = {
 	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
 	0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
 	0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
-};
-
-const uint8_t erased_block[UBI_HEADER_SIZE] = {
-	[0 ...(UBI_HEADER_SIZE - 1)] = 0xFF,
 };
 
 /* Module interface function definitions ----------------------------------- */
@@ -66,10 +59,4 @@ void key_fingerprint(psa_key_id_t key_id, uint8_t *MAC, size_t mac_size)
 						   message, sizeof(message) - 1,
 						   MAC, mac_size, &mac_length));
 	zassert_equal(UBI_MAC_SIZE, mac_length);
-}
-
-void fix_crc(uint8_t *buffer)
-{
-	sys_put_be32(crc32_ieee(buffer, HEADER_CRC_OFFSET),
-		     &buffer[HEADER_CRC_OFFSET]);
 }

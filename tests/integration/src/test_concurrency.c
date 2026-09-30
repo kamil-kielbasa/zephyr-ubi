@@ -14,6 +14,7 @@
 
 /* Standard library headers: */
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -25,7 +26,7 @@
 #include <ubi/ubi.h>
 
 /* Test headers: */
-#include "common.h"
+#include "flash_faults.h"
 #include "suite.h"
 
 /* Module defines ---------------------------------------------------------- */
@@ -44,13 +45,22 @@
 #define WORKER_LEB (1)
 #define WORKER_SEED (0xC2)
 
+#if defined(CONFIG_FLASH_SIMULATOR)
+
+/** Bytes written between two switches of thread, on the simulator. */
+#define YIELD_EVERY (64)
+
+#endif /* CONFIG_FLASH_SIMULATOR */
+
 /* Static function declarations -------------------------------------------- */
 
 /**
  * \brief Rewrite one logical block over and over, keeping maintenance up,
  *        and report the first refusal rather than asserting.
+ *
+ * \param[out] rounds                   Counts the rounds finished.
  */
-static int drive(uint32_t lnum, uint8_t seed);
+static int drive(uint32_t lnum, uint8_t seed, atomic_t *rounds);
 
 /**
  * \brief Thread entry: drive() with the worker's block and pattern.
@@ -70,9 +80,16 @@ static uint32_t worker_vol_id = UBI_VOL_ID_INVALID;
 /** What drive() returned on the worker. */
 static int worker_result = 0;
 
+/** Rounds each thread has finished. */
+static atomic_t main_rounds = ATOMIC_INIT(0);
+static atomic_t worker_rounds = ATOMIC_INIT(0);
+
+/** Rounds the test thread had finished when the worker began. */
+static atomic_val_t main_rounds_at_worker_start = 0;
+
 /* Static function definitions --------------------------------------------- */
 
-static int drive(uint32_t lnum, uint8_t seed)
+static int drive(uint32_t lnum, uint8_t seed, atomic_t *rounds)
 {
 	struct ubi_maintenance_result result = { 0 };
 	uint8_t written[UBI_TEST_PAYLOAD_SIZE] = { 0 };
@@ -95,13 +112,17 @@ static int drive(uint32_t lnum, uint8_t seed)
 			return ret;
 
 		/* The other thread's block must never show through this one. */
-		if (0 != memcmp(written, read, sizeof(read)))
+		const bool same = (0 == memcmp(written, read, sizeof(read)));
+
+		if (!same)
 			return -EBADMSG;
 
 		ret = ubi_maintenance(ubi, UBI_MAINTENANCE_RECLAIM, 1, &result);
 
 		if (0 != ret)
 			return ret;
+
+		atomic_inc(rounds);
 	}
 
 	return 0;
@@ -113,17 +134,20 @@ static void worker(void *unused1, void *unused2, void *unused3)
 	ARG_UNUSED(unused2);
 	ARG_UNUSED(unused3);
 
-	worker_result = drive(WORKER_LEB, WORKER_SEED);
+	main_rounds_at_worker_start = atomic_get(&main_rounds);
+	worker_result = drive(WORKER_LEB, WORKER_SEED, &worker_rounds);
 }
 
 /* Module interface function definitions ----------------------------------- */
 
 /*
- * Given: two threads sharing one attached handle, each rewriting a logical
- *        block of its own and keeping maintenance up.
- * When:  they run at the same time.
- * Then:  neither is refused, neither sees the other's bytes, and each block
- *        holds what its own thread wrote last, before and after a reattach.
+ * Given: two threads of the same priority sharing one attached handle, each
+ *        rewriting a logical block of its own and keeping maintenance up.
+ * When:  they run at the same time, switching in the middle of flash writes
+ *        on the simulator and wherever the driver waits on hardware.
+ * Then:  their work overlaps, neither is refused, neither sees the other's
+ *        bytes, and each block holds what its own thread wrote last, before
+ *        and after a reattach.
  */
 ZTEST(ubi_concurrency, test_two_threads_may_share_one_handle)
 {
@@ -139,20 +163,43 @@ ZTEST(ubi_concurrency, test_two_threads_may_share_one_handle)
 
 	worker_vol_id = UBI_VOL_ID_INVALID;
 	worker_result = 0;
+	atomic_clear(&main_rounds);
+	atomic_clear(&worker_rounds);
+	main_rounds_at_worker_start = WORKER_ROUNDS;
 
 	zassert_ok(ubi_device_format(&config));
 	zassert_ok(ubi_device_init(ubi, &config));
 	zassert_ok(ubi_volume_create(ubi, &wanted, &worker_vol_id));
 
-	k_thread_create(&worker_thread, worker_stack, WORKER_STACK_SIZE, worker,
-			NULL, NULL, NULL, K_PRIO_PREEMPT(1), 0, K_NO_WAIT);
+#if defined(CONFIG_FLASH_SIMULATOR)
+	flash_yield_every(YIELD_EVERY);
+#endif
 
-	const int main_result = drive(MAIN_LEB, MAIN_SEED);
+	k_thread_create(&worker_thread, worker_stack, WORKER_STACK_SIZE, worker,
+			NULL, NULL, NULL,
+			k_thread_priority_get(k_current_get()), 0, K_NO_WAIT);
+
+	const int main_result = drive(MAIN_LEB, MAIN_SEED, &main_rounds);
+	const atomic_val_t worker_rounds_at_main_end =
+		atomic_get(&worker_rounds);
 
 	zassert_ok(k_thread_join(&worker_thread, K_FOREVER));
 
+#if defined(CONFIG_FLASH_SIMULATOR)
+	flash_yield_every(0);
+#endif
+
 	zassert_ok(main_result, "the test thread was refused");
 	zassert_ok(worker_result, "the worker was refused");
+
+#if defined(CONFIG_FLASH_SIMULATOR)
+	zassert_true(main_rounds_at_worker_start < WORKER_ROUNDS,
+		     "the worker has to start while the test thread is busy");
+	zassert_true(0 < worker_rounds_at_main_end,
+		     "and get work done before the test thread is through");
+#else
+	ARG_UNUSED(worker_rounds_at_main_end);
+#endif
 
 	zassert_ok(ubi_leb_read(ubi, worker_vol_id, MAIN_LEB, 0, read,
 				sizeof(read)));

@@ -26,7 +26,7 @@
 #include "ubi_key.h"
 
 /* Test headers: */
-#include "common.h"
+#include "headers.h"
 #include "suite.h"
 
 /* Module interface function definitions ----------------------------------- */
@@ -80,6 +80,41 @@ ZTEST(ubi_unit, test_mac_reports_tampering_of_every_byte)
 			      ubi_impl_header_ec_parse(buffer, sizeof(buffer),
 						       key_header, TEST_PNUM,
 						       TEST_ERASE_VALUE, NULL),
+			      "byte %zu escaped detection", i);
+	}
+}
+
+ZTEST(ubi_unit, test_vid_mac_reports_tampering_of_every_byte)
+{
+	const struct ubi_vid_header header = {
+		.sqnum = 0x0102030405060708ULL,
+		.vol_id = 7,
+		.lnum = 3,
+		.image_seq = TEST_IMAGE_SEQ,
+		.data_size = 256,
+		.data_crc = 0xC0FFEE11UL,
+		.copy_flag = true,
+	};
+	uint8_t original[UBI_HEADER_SIZE] = { 0 };
+
+	zassert_ok(ubi_impl_header_vid_serialize(&header, key_header, TEST_PNUM,
+						 original, sizeof(original)));
+
+	/* As for the erase counter header, the reserved bytes included. */
+	for (size_t i = 0; i < HEADER_CRC_OFFSET; ++i) {
+		const enum ubi_header_status expected =
+			(i < sizeof(uint32_t)) ? UBI_HEADER_NOT_UBI :
+						 UBI_HEADER_TAMPERED;
+		uint8_t buffer[UBI_HEADER_SIZE] = { 0 };
+
+		memcpy(buffer, original, sizeof(buffer));
+		buffer[i] ^= 0x01;
+		fix_crc(buffer);
+
+		zassert_equal(expected,
+			      ubi_impl_header_vid_parse(buffer, sizeof(buffer),
+							key_header, TEST_PNUM,
+							TEST_ERASE_VALUE, NULL),
 			      "byte %zu escaped detection", i);
 	}
 }

@@ -1,0 +1,15 @@
+/*
+ * Copyright (c) 2026 Kamil Kiełbasa
+ * SPDX-License-Identifier: MIT
+ *
+ * The upper megabyte of the simulated flash, 256 blocks of 4 KiB.
+ */
+
+&flash0 {
+	partitions {
+		ubi_partition: partition@100000 {
+			label = "ubi";
+			reg = <0x00100000 0x00100000>;
+		};
+	};
+};

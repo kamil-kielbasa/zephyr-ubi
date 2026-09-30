@@ -3,14 +3,9 @@
  * \author  Kamil Kielbasa
  * \brief   Lifecycle of a physical erase block.
  *
- *          Which blocks exist is the partition's business, but what each one
- *          is currently for belongs here: the state every block is in, the
- *          erase-and-stamp that turns an unknown block into a usable one, and
- *          the choice of which block to use next.
- *
- *          Internal to the library. Arguments arriving here have already
- *          passed the boundary in ubi_api.c, so a block number outside the
- *          partition is a defect rather than an input to report on.
+ *          The state every block is in, the erase-and-stamp that makes a
+ *          block usable, and the choice of which block to use next. Block
+ *          numbers arriving here are within the partition.
  *
  * \copyright Copyright (c) 2026
  *
@@ -35,7 +30,7 @@
  * \brief Read the lifecycle state of a physical erase block.
  *
  * \param[in] ubi                       Attached device.
- * \param pnum                          Physical erase block, within range.
+ * \param pnum                          Physical erase block.
  *
  * \return Its state.
  */
@@ -43,10 +38,10 @@ enum ubi_peb_state ubi_impl_peb_state_get(const struct ubi_device *ubi,
 					  uint32_t pnum);
 
 /**
- * \brief Set it. The narrowing to a byte happens here and nowhere else.
+ * \brief Set the lifecycle state of a physical erase block.
  *
  * \param[in,out] ubi                   Attached device.
- * \param pnum                          Physical erase block, within range.
+ * \param pnum                          Physical erase block.
  * \param state                         State to record.
  */
 void ubi_impl_peb_state_set(struct ubi_device *ubi, uint32_t pnum,
@@ -55,17 +50,16 @@ void ubi_impl_peb_state_set(struct ubi_device *ubi, uint32_t pnum,
 /**
  * \brief Erase a block and stamp it with a fresh erase counter header.
  *
- *        Wear history is worth keeping, so the previous count is read back
- *        first. A block whose count can no longer be read starts again from
- *        the average of the blocks that still have one, not from zero: zero
- *        would make it look brand new and \ref ubi_impl_peb_allocate_for_write would keep
- *        choosing it until it wore out.
+ *        The count comes from RAM, or from the header while formatting. With
+ *        \c CONFIG_UBI_ERASE_INVALIDATES_HEADERS every header that still
+ *        verifies is cleared first, so an erase cut short is recognised. A
+ *        block left unerased leaves an attached device read-only.
  *
  * \param[in,out] ubi                   Device holding the partition.
  * \param pnum                          Physical erase block to prepare.
  *
  * \retval 0
- *         Erased and stamped; the block is now #UBI_PEB_FREE.
+ *         Erased and stamped; the block is #UBI_PEB_FREE.
  * \retval -EINVAL
  *         The block has been erased #UBI_MAX_ERASE_COUNT times already.
  * \retval -EIO
@@ -74,12 +68,31 @@ void ubi_impl_peb_state_set(struct ubi_device *ubi, uint32_t pnum,
 int ubi_impl_peb_prepare(struct ubi_device *ubi, uint32_t pnum);
 
 /**
+ * \brief Erase and stamp a block waiting for reclaim, blank or foreign, and
+ *        retire it if it refuses.
+ *
+ *        A block an unmap let go of goes together with every other copy of
+ *        its logical block still waiting.
+ *
+ * \param[in,out] ubi                   Attached device.
+ * \param pnum                          Block to reclaim.
+ *
+ * \retval 0
+ *         Erased and stamped; the block is #UBI_PEB_FREE.
+ * \retval -EINVAL
+ *         A block has been erased #UBI_MAX_ERASE_COUNT times already.
+ * \retval -EIO
+ *         The crypto backend or the flash driver failed.
+ */
+int ubi_impl_peb_reclaim(struct ubi_device *ubi, uint32_t pnum);
+
+/**
  * \brief Choose a block to write next and hand it over ready to use.
  *
- *        Prefers a block that is already erased and stamped, taking the most
- *        worn one still within \c CONFIG_UBI_WEAR_LEVELING_THRESHOLD erases
- *        of the least worn. Falls back to erasing an #UBI_PEB_UNKNOWN block.
- *        Blocks waiting for #UBI_MAINTENANCE_RECLAIM are left alone.
+ *        Takes the most worn free block within
+ *        \c CONFIG_UBI_WEAR_LEVELING_THRESHOLD erases of the least worn one.
+ *        With none free, erases the least worn blank block, and failing that
+ *        the least worn one waiting for reclaim.
  *
  * \param[in,out] ubi                   Attached device.
  * \param[out] pnum                     Block to use, left #UBI_PEB_FREE.
@@ -87,19 +100,15 @@ int ubi_impl_peb_prepare(struct ubi_device *ubi, uint32_t pnum);
  * \retval 0
  *         Allocated.
  * \retval -ENOSPC
- *         No block is available; reclaiming may free some.
+ *         Every block is in use or out of service.
  * \retval -EIO
  *         The crypto backend or the flash driver failed.
  */
 int ubi_impl_peb_allocate_for_write(struct ubi_device *ubi, uint32_t *pnum);
 
 /**
- * \brief Choose a well worn block that is ready to use.
- *
- *        The counterpart of \ref ubi_impl_peb_allocate_for_write: levelling moves data
- *        that never changes onto a block already erased many times. The reach
- *        is twice as far but still bounded, so relocation cannot keep landing
- *        on the single most worn block. Only #UBI_PEB_FREE blocks qualify.
+ * \brief Choose a free block for relocation to move data onto: the most
+ *        worn one within twice the levelling threshold of the least worn.
  *
  * \param[in] ubi                       Attached device.
  * \param[out] pnum                     Block to use, left #UBI_PEB_FREE.
@@ -107,17 +116,14 @@ int ubi_impl_peb_allocate_for_write(struct ubi_device *ubi, uint32_t *pnum);
  * \retval 0
  *         Allocated.
  * \retval -ENOSPC
- *         No block is erased and waiting; reclaiming may free some.
+ *         No block is free.
  */
 int ubi_impl_peb_allocate_for_levelling(const struct ubi_device *ubi,
 					uint32_t *pnum);
 
 /**
- * \brief Retire a block that would not take a write or an erase.
- *
- *        Held in RAM only, so a reattach gives the block another chance. A
- *        persistent fault will retire it again; a one-off will not condemn
- *        it forever.
+ * \brief Retire a block that would not take a write or an erase, in RAM
+ *        only, so that a reattach gives it another chance.
  *
  * \param[in,out] ubi                   Attached device.
  * \param pnum                          Block to retire.
@@ -129,17 +135,48 @@ void ubi_impl_peb_retire(struct ubi_device *ubi, uint32_t pnum, uint32_t vol_id,
 			 uint32_t lnum);
 
 /**
- * \brief Write a block off after it refused a second time.
+ * \brief Erase a block whose header must not stand, and retire it.
  *
- *        \ref ubi_impl_peb_retire leaves a block in line for another attempt;
- *        this is what that attempt reaches when it fails. Out of service
- *        until the next attach, and no longer counted as work waiting, so
- *        that a block which is finished stops costing an erase every time
- *        the application asks for repairs.
+ *        An erase that fails leaves the device read-only, and is logged: the
+ *        next attach may take what the block holds.
+ *
+ * \param[in,out] ubi                   Attached device.
+ * \param pnum                          Block to withdraw.
+ * \param vol_id                        Volume its header names.
+ * \param lnum                          Logical block its header names.
+ */
+void ubi_impl_peb_withdraw(struct ubi_device *ubi, uint32_t pnum,
+			   uint32_t vol_id, uint32_t lnum);
+
+/**
+ * \brief Take a retired block out of service until the next attach, after it
+ *        failed its second chance.
  *
  * \param[in,out] ubi                   Attached device.
  * \param pnum                          Block to write off.
  */
 void ubi_impl_peb_write_off(struct ubi_device *ubi, uint32_t pnum);
+
+/**
+ * \brief Erase every block waiting for reclaim that still names one of the
+ *        logical blocks \p first to \p first + \p count - 1 of a volume.
+ *
+ *        Such a block is an older copy, or the one an unmap let go of, and
+ *        the next attach would hand it back. The copies a change or an
+ *        attach turned down go before the one an unmap let go of, each the
+ *        oldest first, so an erase cut short leaves only the newest.
+ *
+ * \param[in,out] ubi                   Attached device.
+ * \param vol_id                        Volume.
+ * \param first                         First logical block concerned.
+ * \param count                         How many.
+ *
+ * \retval 0
+ *         No such copy is left.
+ * \retval -EIO
+ *         A block could not be read or erased; it may still name one.
+ */
+int ubi_impl_peb_purge(struct ubi_device *ubi, uint32_t vol_id, uint32_t first,
+		       uint32_t count);
 
 #endif /* UBI_PEB_H */

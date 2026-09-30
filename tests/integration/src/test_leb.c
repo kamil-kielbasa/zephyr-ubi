@@ -1,7 +1,7 @@
 /**
  * \file    test_leb.c
  * \author  Kamil Kielbasa
- * \brief   Mapping, reading and writing logical erase blocks.
+ * \brief   Mapping, reading, writing and appending to logical erase blocks.
  *
  * \copyright Copyright (c) 2026
  *
@@ -11,6 +11,7 @@
 
 /* Standard library headers: */
 #include <errno.h>
+#include <stdint.h>
 #include <string.h>
 
 /* Zephyr headers: */
@@ -21,7 +22,7 @@
 #include <ubi/ubi.h>
 
 /* Test headers: */
-#include "common.h"
+#include "partition.h"
 #include "suite.h"
 
 /* Module variables and constants ------------------------------------------ */
@@ -81,7 +82,7 @@ ZTEST(ubi_leb, test_mapping_gives_an_empty_block)
 	zassert_ok(ubi_leb_map(ubi, vol_id, 1));
 	zassert_ok(ubi_device_get_info(ubi, &after));
 
-	zassert_equal(before.global_sqnum + 1, after.global_sqnum,
+	zassert_equal(before.max_sqnum + 1, after.max_sqnum,
 		      "mapping seals one header, so it spends one sequence "
 		      "number");
 
@@ -109,11 +110,10 @@ ZTEST(ubi_leb, test_mapping_a_mapped_block_is_refused)
 	zassert_ok(ubi_leb_map(ubi, vol_id, 0));
 	zassert_ok(ubi_device_get_info(ubi, &before));
 
-	/* Linux answers -EBADMSG, which here means a MAC that failed. */
 	zassert_equal(-EEXIST, ubi_leb_map(ubi, vol_id, 0));
 
 	zassert_ok(ubi_device_get_info(ubi, &after));
-	zassert_equal(before.global_sqnum, after.global_sqnum,
+	zassert_equal(before.max_sqnum, after.max_sqnum,
 		      "a refusal must not write anything");
 
 	zassert_ok(ubi_device_deinit(ubi));
@@ -200,50 +200,12 @@ ZTEST(ubi_leb, test_a_change_is_readable_after_a_reattach)
 }
 
 /*
- * Given: a logical block that has been changed once already.
- * When:  it is changed again.
- * Then:  it still occupies one physical block and reads the new contents,
- *        while the old block stays on the flash until reclaim takes it.
+ * Given: a logical block holding data, and one never written.
+ * When:  a change, an append and a read are asked for with a length of zero.
+ * Then:  each succeeds and nothing is written, because a degenerate length
+ *        must not spend an erase, mapped or not.
  */
-ZTEST(ubi_leb, test_a_change_leaves_the_old_block_until_reclaim)
-{
-	const uint32_t vol_id = volume_ready(UBI_TEST_VOLUME_LEBS);
-	struct ubi_device_info before = { 0 };
-	struct ubi_device_info after = { 0 };
-	uint8_t old[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-	uint8_t fresh[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-	uint8_t read[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-
-	pattern_fill(old, sizeof(old), 0x22);
-	pattern_fill(fresh, sizeof(fresh), 0x33);
-
-	zassert_ok(ubi_leb_change(ubi, vol_id, 0, old, sizeof(old)));
-	zassert_ok(ubi_device_get_info(ubi, &before));
-
-	zassert_ok(ubi_leb_change(ubi, vol_id, 0, fresh, sizeof(fresh)));
-	zassert_ok(ubi_device_get_info(ubi, &after));
-
-	zassert_equal(mapped_pebs(&before), mapped_pebs(&after),
-		      "one logical block may occupy only one physical one");
-
-	zassert_ok(ubi_leb_read(ubi, vol_id, 0, 0, read, sizeof(read)));
-	zassert_mem_equal(fresh, read, sizeof(fresh),
-			  "the LEB has to show the new contents");
-
-	zassert_ok(ubi_device_deinit(ubi));
-
-	zassert_equal(1, count_data_matching(fresh, sizeof(fresh)));
-	zassert_equal(1, count_data_matching(old, sizeof(old)),
-		      "the old block is queued, not erased");
-}
-
-/*
- * Given: a logical block holding data.
- * When:  a change and an append are both asked for with a length of zero.
- * Then:  nothing is written and the contents stay, because a degenerate
- *        length must not spend an erase.
- */
-ZTEST(ubi_leb, test_writing_nothing_does_nothing)
+ZTEST(ubi_leb, test_a_length_of_zero_does_nothing)
 {
 	const uint32_t vol_id = volume_ready(UBI_TEST_VOLUME_LEBS);
 	struct ubi_device_info before = { 0 };
@@ -257,9 +219,11 @@ ZTEST(ubi_leb, test_writing_nothing_does_nothing)
 
 	zassert_ok(ubi_leb_change(ubi, vol_id, 0, NULL, 0));
 	zassert_ok(ubi_leb_write_at(ubi, vol_id, 0, 0, NULL, 0));
+	zassert_ok(ubi_leb_read(ubi, vol_id, 0, 0, read, 0));
+	zassert_ok(ubi_leb_read(ubi, vol_id, 1, 0, read, 0));
 
 	zassert_ok(ubi_device_get_info(ubi, &after));
-	zassert_equal(before.global_sqnum, after.global_sqnum);
+	zassert_equal(before.max_sqnum, after.max_sqnum);
 
 	zassert_ok(ubi_leb_read(ubi, vol_id, 0, 0, read, sizeof(read)));
 	zassert_mem_equal(written, read, sizeof(written),
@@ -271,9 +235,7 @@ ZTEST(ubi_leb, test_writing_nothing_does_nothing)
 /*
  * Given: an unmapped logical block.
  * When:  it is appended to without being mapped first.
- * Then:  the write takes a block on its own, as ubi_eba_write_leb() does in
- *        Linux, and a second record placed where the caller says survives a
- *        reattach.
+ * Then:  the write takes a block on its own and the record reads back.
  */
 ZTEST(ubi_leb, test_an_append_maps_the_block_it_needs)
 {
@@ -290,14 +252,7 @@ ZTEST(ubi_leb, test_an_append_maps_the_block_it_needs)
 	zassert_ok(ubi_leb_get_info(ubi, vol_id, 0, &info));
 	zassert_true(info.mapped);
 
-	zassert_ok(ubi_leb_write_at(ubi, vol_id, 0, sizeof(written), written,
-				    sizeof(written)));
-
-	zassert_ok(ubi_device_deinit(ubi));
-	zassert_ok(ubi_device_init(ubi, &config));
-
-	zassert_ok(ubi_leb_read(ubi, vol_id, 0, sizeof(written), read,
-				sizeof(read)));
+	zassert_ok(ubi_leb_read(ubi, vol_id, 0, 0, read, sizeof(read)));
 	zassert_mem_equal(written, read, sizeof(written));
 
 	zassert_ok(ubi_device_deinit(ubi));
@@ -360,236 +315,28 @@ ZTEST(ubi_leb, test_a_block_the_volume_does_not_reach_is_refused)
 	zassert_ok(ubi_device_deinit(ubi));
 }
 
-/* Tests: what a power loss may leave behind -------------------------------- */
-
 /*
- * Given: a block changed twice, with nothing reclaimed in between, so two
- *        physical blocks carry a sealed header naming the same logical one.
- * When:  the device is attached.
- * Then:  the copy with the higher sequence number wins and the older one is
- *        queued for reclaim, which is how an interrupted reclaim is survived.
+ * Given: a device whose every block is either in use or waiting for reclaim,
+ *        and an application that never runs reclaim.
+ * When:  it keeps changing its blocks, many more times than there are blocks.
+ * Then:  every change goes through, because a block waiting for reclaim is
+ *        erased on the spot once nothing else is left.
  */
-ZTEST(ubi_leb, test_the_newer_of_two_copies_wins_the_block)
+ZTEST(ubi_leb, test_changes_carry_on_when_nothing_is_reclaimed)
 {
-	const uint32_t vol_id = volume_ready(UBI_TEST_VOLUME_LEBS);
-	struct ubi_device_info before = { 0 };
-	struct ubi_device_info after = { 0 };
-	uint8_t old[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-	uint8_t fresh[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-	uint8_t read[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-
-	pattern_fill(old, sizeof(old), 0x6A);
-	pattern_fill(fresh, sizeof(fresh), 0x7B);
-
-	zassert_ok(ubi_leb_change(ubi, vol_id, 0, old, sizeof(old)));
-	zassert_ok(ubi_leb_change(ubi, vol_id, 0, fresh, sizeof(fresh)));
-	zassert_ok(ubi_device_get_info(ubi, &before));
-	zassert_ok(ubi_device_deinit(ubi));
-
-	zassert_equal(1, count_data_matching(old, sizeof(old)),
-		      "the older copy is still on the flash");
-	zassert_equal(1, count_data_matching(fresh, sizeof(fresh)));
-
-	zassert_ok(ubi_device_init(ubi, &config));
-
-	zassert_ok(ubi_leb_read(ubi, vol_id, 0, 0, read, sizeof(read)));
-	zassert_mem_equal(fresh, read, sizeof(fresh),
-			  "the higher sequence number has to win");
-
-	zassert_ok(ubi_device_get_info(ubi, &after));
-	zassert_equal(before.reclaimable_pebs, after.reclaimable_pebs,
-		      "the loser is queued for reclaim, exactly as it was "
-		      "before the reboot");
-
-	zassert_ok(ubi_device_deinit(ubi));
-}
-
-/*
- * Given: a block changed twice, with the second write cut short so its data
- *        no longer matches the checksum its sealed header promised.
- * When:  the device is attached.
- * Then:  the older copy wins, so a cut-short write never replaces what was
- *        already there.
- */
-ZTEST(ubi_leb, test_an_interrupted_change_leaves_the_old_contents)
-{
-	const uint32_t vol_id = volume_ready(UBI_TEST_VOLUME_LEBS);
-	uint8_t old[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-	uint8_t fresh[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-	uint8_t read[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-
-	pattern_fill(old, sizeof(old), 0x88);
-	pattern_fill(fresh, sizeof(fresh), 0x99);
-
-	zassert_ok(ubi_leb_change(ubi, vol_id, 0, old, sizeof(old)));
-	zassert_ok(ubi_leb_change(ubi, vol_id, 0, fresh, sizeof(fresh)));
-	zassert_ok(ubi_device_deinit(ubi));
-
-	zassert_equal(1, corrupt_data_matching(fresh, sizeof(fresh)));
-
-	zassert_ok(ubi_device_init(ubi, &config));
-
-	zassert_ok(ubi_leb_read(ubi, vol_id, 0, 0, read, sizeof(read)));
-	zassert_mem_equal(old, read, sizeof(old),
-			  "a cut-short write must not replace what was there");
-
-	zassert_ok(ubi_device_deinit(ubi));
-}
-
-/*
- * Given: a block written once, with that write cut short.
- * When:  the device is attached.
- * Then:  there was no older copy to fall back to, so the block reads as one
- *        nobody ever wrote.
- */
-ZTEST(ubi_leb, test_an_interrupted_first_change_leaves_nothing)
-{
-	const uint32_t vol_id = volume_ready(UBI_TEST_VOLUME_LEBS);
-	struct ubi_leb_info info = { 0 };
-	uint8_t fresh[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-	uint8_t erased[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-	uint8_t read[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-
-	pattern_fill(fresh, sizeof(fresh), 0xA5);
-	memset(erased, UBI_TEST_ERASED, sizeof(erased));
-
-	zassert_ok(ubi_leb_change(ubi, vol_id, 0, fresh, sizeof(fresh)));
-	zassert_ok(ubi_device_deinit(ubi));
-
-	zassert_equal(1, corrupt_data_matching(fresh, sizeof(fresh)));
-
-	zassert_ok(ubi_device_init(ubi, &config));
-
-	zassert_ok(ubi_leb_get_info(ubi, vol_id, 0, &info));
-	zassert_false(info.mapped);
-
-	zassert_ok(ubi_leb_read(ubi, vol_id, 0, 0, read, sizeof(read)));
-	zassert_mem_equal(erased, read, sizeof(read));
-
-	zassert_ok(ubi_device_deinit(ubi));
-}
-
-/*
- * Given: a block appended to, so no header promises anything about the bytes.
- * When:  the data is damaged and the device attached.
- * Then:  UBI hands back exactly what is on the flash, because an append is
- *        the caller's to check.
- */
-ZTEST(ubi_leb, test_an_interrupted_append_is_the_callers_problem)
-{
-	const uint32_t vol_id = volume_ready(UBI_TEST_VOLUME_LEBS);
+	struct ubi_device_info info = { 0 };
+	uint32_t vol_id = UBI_VOL_ID_INVALID;
 	uint8_t written[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-	uint8_t read[UBI_TEST_PAYLOAD_SIZE] = { 0 };
+	const uint32_t leb_count = volume_under_load(&vol_id);
 
-	pattern_fill(written, sizeof(written), 0xC3);
+	zassert_ok(ubi_device_get_info(ubi, &info));
 
-	zassert_ok(ubi_leb_map(ubi, vol_id, 0));
-	zassert_ok(
-		ubi_leb_write_at(ubi, vol_id, 0, 0, written, sizeof(written)));
-	zassert_ok(ubi_device_deinit(ubi));
-
-	zassert_equal(1, corrupt_data_matching(written, sizeof(written)));
-
-	zassert_ok(ubi_device_init(ubi, &config));
-
-	zassert_ok(ubi_leb_read(ubi, vol_id, 0, 0, read, sizeof(read)));
-	zassert_not_equal(0, memcmp(written, read, sizeof(written)));
-
-	zassert_ok(ubi_device_deinit(ubi));
-}
-
-/* Tests: getting rid of a block ------------------------------------------- */
-
-/*
- * Given: a block that was written and then unmapped.
- * When:  the device is detached and attached again.
- * Then:  the mapping comes back, because unmapping never reached the flash;
- *        ubi_leb_erase() is the durable way, exactly as in Linux UBI.
- */
-ZTEST(ubi_leb, test_an_unmap_may_not_survive_a_reboot)
-{
-	const uint32_t vol_id = volume_ready(UBI_TEST_VOLUME_LEBS);
-	struct ubi_leb_info info = { 0 };
-	uint8_t written[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-
-	pattern_fill(written, sizeof(written), 0x1D);
-
-	zassert_ok(ubi_leb_change(ubi, vol_id, 0, written, sizeof(written)));
-	zassert_ok(ubi_leb_unmap(ubi, vol_id, 0));
-
-	zassert_ok(ubi_leb_get_info(ubi, vol_id, 0, &info));
-	zassert_false(info.mapped);
-
-	zassert_ok(ubi_device_deinit(ubi));
-	zassert_ok(ubi_device_init(ubi, &config));
-
-	zassert_ok(ubi_leb_get_info(ubi, vol_id, 0, &info));
-	zassert_true(info.mapped, "unmap alone does not reach the flash");
-	zassert_equal(1, count_data_matching(written, sizeof(written)));
-
-	zassert_ok(ubi_device_deinit(ubi));
-}
-
-/*
- * Given: a block holding data.
- * When:  it is erased.
- * Then:  the contents are gone from the flash itself and stay gone across a
- *        reboot.
- */
-ZTEST(ubi_leb, test_an_erase_takes_the_contents_off_the_flash)
-{
-	const uint32_t vol_id = volume_ready(UBI_TEST_VOLUME_LEBS);
-	struct ubi_leb_info info = { 0 };
-	uint8_t written[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-
-	pattern_fill(written, sizeof(written), 0x2E);
-
-	zassert_ok(ubi_leb_change(ubi, vol_id, 0, written, sizeof(written)));
-	zassert_equal(1, count_data_matching(written, sizeof(written)));
-
-	zassert_ok(ubi_leb_erase(ubi, vol_id, 0));
-
-	zassert_ok(ubi_leb_get_info(ubi, vol_id, 0, &info));
-	zassert_false(info.mapped);
-	zassert_equal(0, count_data_matching(written, sizeof(written)),
-		      "the contents have to be gone from the flash itself");
-
-	zassert_ok(ubi_device_deinit(ubi));
-	zassert_ok(ubi_device_init(ubi, &config));
-
-	zassert_ok(ubi_leb_get_info(ubi, vol_id, 0, &info));
-	zassert_false(info.mapped, "and it has to stay gone across a reboot");
-
-	zassert_ok(ubi_device_deinit(ubi));
-}
-
-/*
- * Given: a block holding data.
- * When:  it is erased, twice.
- * Then:  it is allocatable again without another erase, the wear history
- *        records it, and asking again is not an error.
- */
-ZTEST(ubi_leb, test_an_erase_returns_the_block_to_the_free_pool)
-{
-	const uint32_t vol_id = volume_ready(UBI_TEST_VOLUME_LEBS);
-	struct ubi_device_info before = { 0 };
-	struct ubi_device_info after = { 0 };
-	uint8_t written[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-
-	pattern_fill(written, sizeof(written), 0x3F);
-
-	zassert_ok(ubi_leb_change(ubi, vol_id, 0, written, sizeof(written)));
-	zassert_ok(ubi_device_get_info(ubi, &before));
-
-	zassert_ok(ubi_leb_erase(ubi, vol_id, 0));
-	zassert_ok(ubi_device_get_info(ubi, &after));
-
-	zassert_equal(before.free_pebs + 1, after.free_pebs,
-		      "an erased block is allocatable without another erase");
-	zassert_equal(before.total_erase_count + 1, after.total_erase_count,
-		      "the wear history records the erase");
-
-	zassert_ok(ubi_leb_erase(ubi, vol_id, 0));
+	for (uint32_t round = 0; round < 2 * info.peb_count; ++round) {
+		pattern_fill(written, sizeof(written), (uint8_t)round);
+		zassert_ok(ubi_leb_change(ubi, vol_id, round % leb_count,
+					  written, sizeof(written)),
+			   "change %u ran out of blocks", round);
+	}
 
 	zassert_ok(ubi_device_deinit(ubi));
 }

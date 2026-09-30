@@ -1,7 +1,8 @@
 /**
- * \file    test_integrity.c
+ * \file    test_integrity_block.c
  * \author  Kamil Kielbasa
- * \brief   What a damaged or tampered partition does to an attach.
+ * \brief   What a damaged, forged, foreign or unreadable block does to an
+ *          attach and to a read.
  *
  * \copyright Copyright (c) 2026
  *
@@ -11,18 +12,22 @@
 
 /* Standard library headers: */
 #include <errno.h>
+#include <stdint.h>
 #include <string.h>
 
 /* Zephyr headers: */
 #include <zephyr/storage/flash_map.h>
-#include <zephyr/sys/util.h>
 #include <zephyr/ztest.h>
 
 /* UBI headers: */
 #include <ubi/ubi.h>
 
+#include "ubi_key.h"
+
 /* Test headers: */
-#include "common.h"
+#include "flash_shim.h"
+#include "forge.h"
+#include "partition.h"
 #include "suite.h"
 
 /* Module defines ---------------------------------------------------------- */
@@ -39,96 +44,47 @@
 /** Volume identifier field of the volume identifier header. */
 #define VID_VOL_ID_OFFSET (0x08)
 
-#if defined(CONFIG_FLASH_SIMULATOR)
+/* Static function declarations -------------------------------------------- */
 
-/** Bytes of a new volume table record that reach the flash before it tears. */
-#define RECORD_BYTES_WRITTEN (16)
-
-#endif /* CONFIG_FLASH_SIMULATOR */
+/**
+ * \brief Erase block \p pnum and stamp it, under the right key, with an erase
+ *        counter header of a layout this build cannot address.
+ */
+static void stamp_foreign_layout(uint32_t pnum, uint32_t image_seq);
 
 /* Module variables and constants ------------------------------------------ */
 
-UBI_TEST_SUITE(ubi_integrity);
+UBI_TEST_SUITE(ubi_integrity_block);
+
+/* Static function definitions --------------------------------------------- */
+
+static void stamp_foreign_layout(uint32_t pnum, uint32_t image_seq)
+{
+	const struct ubi_ec_header header = {
+		.erase_count = 1,
+		.image_seq = image_seq,
+		.vid_header_offset = 2 * UBI_VID_HEADER_OFFSET,
+		.data_offset = 2 * UBI_DATA_OFFSET,
+	};
+	psa_key_id_t key_header = PSA_KEY_ID_NULL;
+	psa_key_id_t key_volume_table = PSA_KEY_ID_NULL;
+	uint8_t buffer[UBI_HEADER_SIZE] = { 0 };
+
+	zassert_ok(ubi_impl_key_derive(config.ikm_key_id, NULL, 0, &key_header,
+				       &key_volume_table));
+	zassert_ok(ubi_impl_header_ec_serialize(&header, key_header, pnum,
+						buffer, sizeof(buffer)));
+	ubi_impl_key_destroy(&key_header);
+	ubi_impl_key_destroy(&key_volume_table);
+
+	memset(saved_blocks[0], UBI_TEST_ERASED, sizeof(saved_blocks[0]));
+	memcpy(saved_blocks[0], buffer, sizeof(buffer));
+	block_restore(pnum, saved_blocks[0]);
+}
 
 /* Module interface function definitions ----------------------------------- */
 
-/*
- * Given: a formatted device with one of its two volume table copies damaged.
- * When:  it is attached.
- * Then:  the surviving copy carries it through, and the device reports both
- *        the damaged record and that it is now down to one copy.
- */
-ZTEST(ubi_integrity, test_one_damaged_volume_table_copy_is_survived)
-{
-	struct ubi_device_info before = { 0 };
-	struct ubi_device_info after = { 0 };
-
-	zassert_ok(ubi_device_format(&config));
-	zassert_ok(ubi_device_init(ubi, &config));
-	zassert_ok(ubi_device_get_info(ubi, &before));
-	zassert_ok(ubi_device_deinit(ubi));
-
-	zassert_equal(1, corrupt_volume_tables(config.ikm_key_id, 1));
-
-	zassert_ok(ubi_device_init(ubi, &config));
-	zassert_ok(ubi_device_get_info(ubi, &after));
-	zassert_ok(ubi_device_deinit(ubi));
-
-	zassert_equal(before.image_seq, after.image_seq);
-	zassert_equal(before.revision, after.revision);
-	zassert_equal(1, event_count[UBI_EVENT_VOLUME_TABLE_DEGRADED]);
-
-	/* Damage and forgery of a record are told apart by nothing. */
-	zassert_equal(1, event_count[UBI_EVENT_VOLUME_TABLE_CORRUPT]);
-	zassert_equal(0, event_last[UBI_EVENT_VOLUME_TABLE_CORRUPT].pnum,
-		      "the report has to name the block the first copy is in");
-	zassert_equal(0, event_count[UBI_EVENT_HDR_TAMPERED],
-		      "the headers were not touched");
-}
-
-/*
- * Given: a formatted device with both volume table copies damaged.
- * When:  it is attached.
- * Then:  there is no usable table left, so attach reports no device rather
- *        than guessing at what the volumes were.
- */
-ZTEST(ubi_integrity, test_both_damaged_volume_table_copies_lose_the_device)
-{
-	zassert_ok(ubi_device_format(&config));
-	zassert_equal(2, corrupt_volume_tables(config.ikm_key_id, 2));
-
-	zassert_equal(-ENODEV, ubi_device_init(ubi, &config));
-}
-
-/*
- * Given: a formatted device whose volume table blocks, the only ones a
- *        format stamps, have been erased.
- * When:  it is attached.
- * Then:  nothing is left to recognise, so attach reports no device.
- */
-ZTEST(ubi_integrity, test_erasing_every_stamped_block_loses_the_device)
-{
-	const struct flash_area *flash_area = NULL;
-	const uint32_t blank = partition_fingerprint();
-
-	zassert_ok(ubi_device_format(&config));
-
-	zassert_ok(flash_area_open(UBI_TEST_PARTITION_ID, &flash_area));
-
-	for (uint32_t pnum = 0; pnum < UBI_VOLUME_TABLE_LEB_COUNT; ++pnum) {
-		zassert_ok(flash_area_erase(flash_area,
-					    (off_t)pnum * UBI_TEST_PEB_SIZE,
-					    UBI_TEST_PEB_SIZE));
-	}
-
-	flash_area_close(flash_area);
-
-	zassert_equal(blank, partition_fingerprint(),
-		      "a format stamps the volume table blocks and nothing "
-		      "else");
-
-	zassert_equal(-ENODEV, ubi_device_init(ubi, &config));
-}
+/* Tests: damage ----------------------------------------------------------- */
 
 /*
  * Given: a formatted device with one bit cleared in an erase counter header
@@ -137,7 +93,7 @@ ZTEST(ubi_integrity, test_erasing_every_stamped_block_loses_the_device)
  * Then:  the damage is reported as damage rather than tampering, the block
  *        stops counting as healthy, and the device still opens.
  */
-ZTEST(ubi_integrity, test_a_damaged_erase_counter_header_is_reported)
+ZTEST(ubi_integrity_block, test_a_damaged_erase_counter_header_is_reported)
 {
 	const struct flash_area *flash_area = NULL;
 	struct ubi_device_info info = { 0 };
@@ -170,7 +126,7 @@ ZTEST(ubi_integrity, test_a_damaged_erase_counter_header_is_reported)
  * Then:  the block is kept rather than erased, because it carries the only
  *        copy of data the application may still want to salvage.
  */
-ZTEST(ubi_integrity, test_a_damaged_block_that_still_holds_data_is_kept)
+ZTEST(ubi_integrity_block, test_a_damaged_block_that_still_holds_data_is_kept)
 {
 	const struct ubi_volume_config wanted = {
 		.name = "logs", .leb_count = UBI_TEST_VOLUME_LEBS
@@ -188,9 +144,10 @@ ZTEST(ubi_integrity, test_a_damaged_block_that_still_holds_data_is_kept)
 	zassert_ok(ubi_leb_change(ubi, vol_id, 0, written, sizeof(written)));
 	zassert_ok(ubi_device_deinit(ubi));
 
-	/* The lowest numbered blank block, which a reclaim would reach first. */
-	zassert_equal(FIRST_BLANK_PNUM,
-		      pnum_of_data_matching(written, sizeof(written)));
+	/* Below every block the format left blank, so a reclaim would reach
+	 * it first. */
+	zassert_true(FIRST_BLANK_PNUM >
+		     pnum_of_data_matching(written, sizeof(written)));
 	zassert_equal(1, corrupt_header_of_data_matching(written,
 							 sizeof(written)));
 
@@ -214,62 +171,6 @@ ZTEST(ubi_integrity, test_a_damaged_block_that_still_holds_data_is_kept)
 	zassert_ok(ubi_device_deinit(ubi));
 }
 
-/* Tests: an update cut short ---------------------------------------------- */
-
-#if defined(CONFIG_FLASH_SIMULATOR)
-
-/*
- * Given: a device with one volume, and a flash that stops taking writes
- *        partway through the next volume table commit.
- * When:  a second volume is created.
- * Then:  the commit fails, and the table that was there is still the one the
- *        next attach finds: a torn update never costs the volumes already on
- *        the device.
- */
-ZTEST(ubi_integrity, test_an_interrupted_volume_table_update_keeps_the_old_one)
-{
-	const struct ubi_volume_config first = {
-		.name = "first", .leb_count = UBI_TEST_VOLUME_LEBS
-	};
-	const struct ubi_volume_config second = {
-		.name = "second", .leb_count = UBI_TEST_VOLUME_LEBS
-	};
-	struct ubi_device_info before = { 0 };
-	struct ubi_device_info after = { 0 };
-	uint32_t vol_id = UBI_VOL_ID_INVALID;
-
-	zassert_ok(ubi_device_format(&config));
-	zassert_ok(ubi_device_init(ubi, &config));
-	zassert_ok(ubi_volume_create(ubi, &first, &vol_id));
-	zassert_ok(ubi_device_get_info(ubi, &before));
-
-	flash_ops_forget();
-	flash_fail_writes_after(UBI_DATA_OFFSET + RECORD_BYTES_WRITTEN);
-
-	zassert_equal(-EIO, ubi_volume_create(ubi, &second, &vol_id));
-
-	flash_fail_writes_never();
-
-	zassert_true(0 < flash_ops("bytes_written"),
-		     "the point was to tear a write, not to refuse one");
-
-	zassert_ok(ubi_device_deinit(ubi));
-	zassert_ok(ubi_device_init(ubi, &config));
-	zassert_ok(ubi_device_get_info(ubi, &after));
-
-	zassert_ok(ubi_volume_find(ubi, first.name, &vol_id),
-		   "the volume that was committed has to still be there");
-	zassert_equal(-ENOENT, ubi_volume_find(ubi, second.name, &vol_id),
-		      "and the one whose commit was torn must not appear");
-	zassert_equal(before.volume_count, after.volume_count);
-
-	zassert_ok(ubi_device_deinit(ubi));
-}
-
-#endif /* CONFIG_FLASH_SIMULATOR */
-
-/* Tests: how much damage the device carries ------------------------------- */
-
 /*
  * Given: as many blocks with a damaged header and intact data as the
  *        partition tolerates, less one.
@@ -278,7 +179,7 @@ ZTEST(ubi_integrity, test_an_interrupted_volume_table_update_keeps_the_old_one)
  *        one block too many and refuses rather than pretending the device
  *        is sound.
  */
-ZTEST(ubi_integrity, test_more_damage_than_the_device_carries_loses_it)
+ZTEST(ubi_integrity_block, test_more_damage_than_the_device_carries_loses_it)
 {
 	struct ubi_volume_config wanted = { .name = "logs", .leb_count = 0 };
 	struct ubi_device_info info = { 0 };
@@ -293,8 +194,10 @@ ZTEST(ubi_integrity, test_more_damage_than_the_device_carries_loses_it)
 	zassert_ok(ubi_device_init(ubi, &config));
 	zassert_ok(ubi_device_get_info(ubi, &info));
 
-	const uint32_t allowed =
-		MAX(info.peb_count / CORRUPT_PEB_SHARE, CORRUPT_PEB_FLOOR);
+	/* What types.h promises: a twentieth of the good blocks, rounded down,
+	 * or eight when that is zero. */
+	const uint32_t share = (info.peb_count - info.bad_pebs) / 20;
+	const uint32_t allowed = (0 != share) ? share : 8;
 
 	wanted.leb_count = allowed;
 	zassert_ok(ubi_volume_create(ubi, &wanted, &vol_id));
@@ -324,17 +227,18 @@ ZTEST(ubi_integrity, test_more_damage_than_the_device_carries_loses_it)
 		      "%u damaged blocks are one too many", allowed);
 }
 
-/* Tests: a forgery, rather than damage ------------------------------------ */
+/* Tests: forgery ---------------------------------------------------------- */
 
 /*
  * Given: a block whose erase counter header was edited and its checksum
  *        repaired, which is what damage can never look like.
  * When:  the device is attached.
  * Then:  the MAC catches it and it is reported as tampering rather than
- *        damage, the block is taken out of service, and the surviving volume
- *        table copy still carries the device.
+ *        damage, the block no longer counts as this device's and waits to
+ *        be erased, and the surviving volume table copy still carries the
+ *        device.
  */
-ZTEST(ubi_integrity, test_a_forged_erase_counter_header_is_reported)
+ZTEST(ubi_integrity_block, test_a_forged_erase_counter_header_is_reported)
 {
 	struct ubi_device_info info = { 0 };
 
@@ -361,7 +265,7 @@ ZTEST(ubi_integrity, test_a_forged_erase_counter_header_is_reported)
 	zassert_equal(1, event_count[UBI_EVENT_VOLUME_TABLE_DEGRADED]);
 
 	zassert_ok(ubi_device_get_info(ubi, &info));
-	zassert_equal(1, info.bad_pebs, "a forged block is out of service");
+	zassert_equal(0, info.bad_pebs, "the block itself is not broken");
 	zassert_equal(1, info.healthy_pebs, "and is not counted as healthy");
 
 	zassert_ok(ubi_device_deinit(ubi));
@@ -374,7 +278,8 @@ ZTEST(ubi_integrity, test_a_forged_erase_counter_header_is_reported)
  * Then:  it is refused as unauthentic rather than as absent, because a
  *        mistyped key must never look like a blank partition.
  */
-ZTEST(ubi_integrity, test_a_partition_of_forgeries_is_refused_as_unauthentic)
+ZTEST(ubi_integrity_block,
+      test_a_partition_of_forgeries_is_refused_as_unauthentic)
 {
 	zassert_ok(ubi_device_format(&config));
 
@@ -396,7 +301,8 @@ ZTEST(ubi_integrity, test_a_partition_of_forgeries_is_refused_as_unauthentic)
  *        device itself opens: damage behind a verified erase counter header
  *        costs one block, not the partition.
  */
-ZTEST(ubi_integrity, test_a_forged_volume_identifier_header_costs_one_block)
+ZTEST(ubi_integrity_block,
+      test_a_forged_volume_identifier_header_costs_one_block)
 {
 	const struct ubi_volume_config wanted = {
 		.name = "logs", .leb_count = UBI_TEST_VOLUME_LEBS
@@ -431,7 +337,126 @@ ZTEST(ubi_integrity, test_a_forged_volume_identifier_header_costs_one_block)
 	zassert_ok(ubi_device_deinit(ubi));
 }
 
+/* Tests: blocks from elsewhere -------------------------------------------- */
+
+/*
+ * Given: a device holding one block stamped, under the right key, in a
+ *        layout this build cannot address, as a newer release might.
+ * When:  it is attached.
+ * Then:  it is refused as unsupported, rather than the block taken for blank
+ *        and erased.
+ */
+ZTEST(ubi_integrity_block, test_a_block_of_a_newer_release_stops_the_attach)
+{
+	struct ubi_device_info info = { 0 };
+
+	zassert_ok(ubi_device_format(&config));
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_ok(ubi_device_get_info(ubi, &info));
+	zassert_ok(ubi_device_deinit(ubi));
+
+	stamp_foreign_layout(FIRST_BLANK_PNUM, info.image_seq);
+
+	const uint32_t before = partition_fingerprint();
+
+	zassert_equal(-ENOTSUP, ubi_device_init(ubi, &config));
+	zassert_equal(before, partition_fingerprint());
+}
+
+/*
+ * Given: a block of data an earlier format left, whose volume identifier
+ *        header and data were put behind the erase counter header the same
+ *        block carries in this image. Every header is authentic for that
+ *        block.
+ * When:  the device is attached.
+ * Then:  the old data does not appear in the volume that reused its
+ *        identifier: a volume identifier header has to name this image too.
+ */
+ZTEST(ubi_integrity_block, test_data_of_an_earlier_image_cannot_be_smuggled_in)
+{
+	struct ubi_device_info info = { 0 };
+	struct ubi_maintenance_result result = { 0 };
+	struct ubi_leb_info leb = { 0 };
+	uint8_t secret[UBI_TEST_PAYLOAD_SIZE] = { 0 };
+	uint8_t *const earlier_block = saved_blocks[0];
+	uint8_t *const later_block = saved_blocks[1];
+	uint32_t vol_id = volume_ready(UBI_TEST_VOLUME_LEBS);
+
+	pattern_fill(secret, sizeof(secret), 0x5C);
+
+	zassert_ok(ubi_leb_change(ubi, vol_id, 0, secret, sizeof(secret)));
+	zassert_ok(ubi_device_deinit(ubi));
+
+	const uint32_t pnum = pnum_of_data_matching(secret, sizeof(secret));
+
+	block_save(pnum, earlier_block);
+
+	zassert_equal(vol_id, volume_ready(UBI_TEST_VOLUME_LEBS),
+		      "the new image hands out the same identifier");
+
+	/* Every block stamped for the new image, that one included. */
+	zassert_ok(ubi_device_get_info(ubi, &info));
+	zassert_ok(ubi_maintenance(ubi, UBI_MAINTENANCE_RECLAIM,
+				   info.reclaimable_pebs, &result));
+	zassert_ok(ubi_device_deinit(ubi));
+
+	block_save(pnum, later_block);
+	memcpy(&later_block[UBI_VID_HEADER_OFFSET],
+	       &earlier_block[UBI_VID_HEADER_OFFSET],
+	       UBI_TEST_PEB_SIZE - UBI_VID_HEADER_OFFSET);
+	block_restore(pnum, later_block);
+
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_ok(ubi_leb_get_info(ubi, vol_id, 0, &leb));
+	zassert_false(leb.mapped, "data of an earlier image was let in");
+
+	zassert_ok(ubi_device_deinit(ubi));
+}
+
+#if defined(CONFIG_FLASH_SIMULATOR)
+
+/* Tests: a block that cannot be read -------------------------------------- */
+
+/*
+ * Given: a device holding data, and a block whose reads fail, first as a
+ *        whole and then only past its headers.
+ * When:  the device is attached.
+ * Then:  the attach fails rather than carrying on without the block, and
+ *        once the reads come back the data is all there: a read error says
+ *        nothing about what the block holds, so it must not cost it.
+ */
+ZTEST(ubi_integrity_block, test_a_block_that_cannot_be_read_stops_the_attach)
+{
+	uint8_t written[UBI_TEST_PAYLOAD_SIZE] = { 0 };
+	uint8_t read[UBI_TEST_PAYLOAD_SIZE] = { 0 };
+	const uint32_t vol_id = volume_ready(UBI_TEST_VOLUME_LEBS);
+
+	pattern_fill(written, sizeof(written), 0x6D);
+
+	zassert_ok(ubi_leb_change(ubi, vol_id, 0, written, sizeof(written)));
+	zassert_ok(ubi_device_deinit(ubi));
+
+	const uint32_t pnum = pnum_of_data_matching(written, sizeof(written));
+
+	flash_fail_reads_of(pnum);
+	zassert_equal(-EIO, ubi_device_init(ubi, &config));
+
+	flash_fail_reads_in(pnum, UBI_DATA_OFFSET, UBI_TEST_PEB_SIZE);
+	zassert_equal(-EIO, ubi_device_init(ubi, &config));
+
+	flash_fail_reads_never();
+
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_ok(ubi_leb_read(ubi, vol_id, 0, 0, read, sizeof(read)));
+	zassert_mem_equal(written, read, sizeof(written));
+	zassert_ok(ubi_device_deinit(ubi));
+}
+
+#endif /* CONFIG_FLASH_SIMULATOR */
+
 #if defined(CONFIG_UBI_VERIFY_ON_READ)
+
+/* Tests: a block changed while attached ----------------------------------- */
 
 /*
  * Given: an attached device whose block is forged behind the library's back,
@@ -440,7 +465,7 @@ ZTEST(ubi_integrity, test_a_forged_volume_identifier_header_costs_one_block)
  * Then:  the read refuses rather than handing back bytes it cannot vouch
  *        for, which is what the build switch is for.
  */
-ZTEST(ubi_integrity, test_a_read_refuses_a_block_forged_while_attached)
+ZTEST(ubi_integrity_block, test_a_read_refuses_a_block_forged_while_attached)
 {
 	const struct ubi_volume_config wanted = {
 		.name = "logs", .leb_count = UBI_TEST_VOLUME_LEBS
@@ -465,6 +490,47 @@ ZTEST(ubi_integrity, test_a_read_refuses_a_block_forged_while_attached)
 	zassert_equal(-EBADMSG,
 		      ubi_leb_read(ubi, vol_id, 0, 0, read, sizeof(read)),
 		      "the seal is checked before the bytes are handed over");
+
+	zassert_ok(ubi_device_deinit(ubi));
+}
+
+/*
+ * Given: an attached device, and a block that held logical block 0 earlier
+ *        and holds logical block 1 now, whose earlier contents are put back
+ *        behind the library's back. The header is authentic for that block.
+ * When:  logical block 1 is read.
+ * Then:  the read refuses, because the header names another logical block.
+ */
+ZTEST(ubi_integrity_block, test_a_read_refuses_a_block_that_names_another)
+{
+	struct ubi_maintenance_result result = { 0 };
+	uint8_t first[UBI_TEST_PAYLOAD_SIZE] = { 0 };
+	uint8_t second[UBI_TEST_PAYLOAD_SIZE] = { 0 };
+	uint8_t third[UBI_TEST_PAYLOAD_SIZE] = { 0 };
+	uint8_t read[UBI_TEST_PAYLOAD_SIZE] = { 0 };
+	const uint32_t vol_id = volume_ready(UBI_TEST_VOLUME_LEBS);
+
+	pattern_fill(first, sizeof(first), 0x7E);
+	pattern_fill(second, sizeof(second), 0x8F);
+	pattern_fill(third, sizeof(third), 0x90);
+
+	zassert_ok(ubi_leb_change(ubi, vol_id, 0, first, sizeof(first)));
+
+	const uint32_t pnum = pnum_of_data_matching(first, sizeof(first));
+
+	block_save(pnum, saved_blocks[0]);
+
+	/* The block goes back to the pool, and the next change takes it. */
+	zassert_ok(ubi_leb_change(ubi, vol_id, 0, second, sizeof(second)));
+	zassert_ok(ubi_maintenance(ubi, UBI_MAINTENANCE_RECLAIM, 1, &result));
+	zassert_ok(ubi_leb_change(ubi, vol_id, 1, third, sizeof(third)));
+	zassert_equal(pnum, pnum_of_data_matching(third, sizeof(third)));
+
+	block_restore(pnum, saved_blocks[0]);
+
+	zassert_equal(-EBADMSG,
+		      ubi_leb_read(ubi, vol_id, 1, 0, read, sizeof(read)),
+		      "the header names logical block 0");
 
 	zassert_ok(ubi_device_deinit(ubi));
 }

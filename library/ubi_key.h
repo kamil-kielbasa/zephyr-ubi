@@ -23,6 +23,7 @@
 /* Include files ----------------------------------------------------------- */
 
 /* Standard library headers: */
+#include <stddef.h>
 #include <stdint.h>
 
 /* Zephyr headers: */
@@ -72,6 +73,10 @@ BUILD_ASSERT(UBI_MAC_SIZE == PSA_MAC_LENGTH(PSA_KEY_TYPE_AES, UBI_KEY_BITS,
  * \param ikm_key_id                    Application key handle. Must carry
  *                                      \c PSA_KEY_USAGE_DERIVE and permit
  *                                      \c PSA_ALG_HKDF(PSA_ALG_SHA_256).
+ * \param[in] context                   Bytes appended to each label in the
+ *                                      HKDF info, or \c NULL.
+ * \param context_size                  Bytes at \p context, at most
+ *                                      #UBI_KEY_CONTEXT_MAX_SIZE.
  * \param[out] key_header               Key authenticating EC and VID headers.
  * \param[out] key_volume_table         Key authenticating the volume table
  *                                      record.
@@ -79,15 +84,16 @@ BUILD_ASSERT(UBI_MAC_SIZE == PSA_MAC_LENGTH(PSA_KEY_TYPE_AES, UBI_KEY_BITS,
  * \retval 0
  *         Success.
  * \retval -EINVAL
- *         An output pointer is \c NULL, or \p ikm_key_id is
- *         \c PSA_KEY_ID_NULL.
+ *         An output pointer is \c NULL, \p ikm_key_id is
+ *         \c PSA_KEY_ID_NULL, or \p context does not fit.
  * \retval -EACCES
  *         \p ikm_key_id does not exist, or its policy forbids this
  *         derivation.
  * \retval -EIO
  *         The crypto backend failed.
  */
-int ubi_impl_key_derive(psa_key_id_t ikm_key_id, psa_key_id_t *key_header,
+int ubi_impl_key_derive(psa_key_id_t ikm_key_id, const uint8_t *context,
+			size_t context_size, psa_key_id_t *key_header,
 			psa_key_id_t *key_volume_table);
 
 /**

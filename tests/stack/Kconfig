@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Kamil Kiełbasa
+# SPDX-License-Identifier: MIT
+
+mainmenu "UBI stack test"
+
+config UBI_TEST_STACK_BUDGET
+	int "Stack the deepest call may use, in bytes"
+	default 2048
+	help
+	  The figure Operations quotes for a thread that calls into UBI. The
+	  calls run on a thread with 1 KiB more, so that going over is
+	  measured rather than a crash.
+
+source "Kconfig.zephyr"

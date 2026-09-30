@@ -3,13 +3,6 @@
  * \author  Kamil Kielbasa
  * \brief   What a logical erase block can be asked to do.
  *
- *          A LEB is an address; a PEB is where it currently lives. Every
- *          operation here is about that relationship: making one, breaking
- *          it, moving it somewhere fresh, or reading and writing through it.
- *
- *          Internal to the library: the boundary in ubi_api.c has already
- *          checked what arrives here.
- *
  * \copyright Copyright (c) 2026
  *
  */
@@ -34,18 +27,18 @@
 /**
  * \brief Put a physical block behind a logical one, leaving it empty.
  *
- *        A block that already has one keeps it.
- *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
  * \param lnum                          Logical erase block.
  *
  * \retval 0
- *         Mapped, or already was.
+ *         Mapped.
  * \retval -EINVAL
  *         The volume does not reach that far.
  * \retval -ENOENT
  *         No such volume.
+ * \retval -EEXIST
+ *         A physical block backs it already.
  * \retval -ENOSPC
  *         No physical block available.
  * \retval -EIO
@@ -70,21 +63,23 @@ int ubi_impl_leb_map(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
 int ubi_impl_leb_unmap(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
 
 /**
- * \brief Take the physical block away and erase it before returning.
+ * \brief Take the physical block away and erase it before returning, along
+ *        with every older copy still waiting for reclaim.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
  * \param lnum                          Logical erase block.
  *
  * \retval 0
- *         Erased, or nothing was mapped.
+ *         No copy of the block is left on the flash.
  * \retval -EINVAL
  *         The volume does not reach that far.
  * \retval -ENOENT
  *         No such volume.
  * \retval -EIO
- *         The crypto backend or the flash driver failed; the block is queued
- *         for reclaim so a later attempt can retry it.
+ *         The crypto backend or the flash driver failed. A block that could
+ *         not be erased is retired and leaves the device read-only; what it
+ *         held may come back after a reboot.
  */
 int ubi_impl_leb_erase(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
 
@@ -96,7 +91,7 @@ int ubi_impl_leb_erase(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
  * \param lnum                          Logical erase block.
  * \param offset                        Byte offset within the block.
  * \param[out] buffer                   Destination.
- * \param length                        Bytes to read.
+ * \param length                        Bytes to read; zero reads nothing.
  *
  * \retval 0
  *         Read.
@@ -106,7 +101,8 @@ int ubi_impl_leb_erase(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
  * \retval -ENOENT
  *         No such volume.
  * \retval -EBADMSG
- *         Only with \c CONFIG_UBI_VERIFY_ON_READ: the header did not verify.
+ *         Only with \c CONFIG_UBI_VERIFY_ON_READ: the header did not verify,
+ *         or it names another logical block or another image.
  * \retval -EIO
  *         The flash driver failed.
  */
@@ -117,7 +113,8 @@ int ubi_impl_leb_read(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
  * \brief Replace what a logical block holds, atomically.
  *
  *        The new contents go to a block of their own and the mapping moves
- *        only once they are down, so an interruption leaves the old ones.
+ *        only once they are down, so an interruption leaves the old ones,
+ *        or what reached the flash when there were none.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
@@ -143,6 +140,8 @@ int ubi_impl_leb_change(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 /**
  * \brief Write where the caller says, and promise nothing else.
  *
+ *        An unmapped block is mapped on the way.
+ *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
  * \param lnum                          Logical erase block.
@@ -156,7 +155,9 @@ int ubi_impl_leb_change(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
  *         The volume does not reach that far, the range spills past the end
  *         of the block, or the alignment rule was broken.
  * \retval -ENOENT
- *         No such volume, or the block is not mapped.
+ *         No such volume.
+ * \retval -ENOSPC
+ *         The block was unmapped and no physical block was available.
  * \retval -EIO
  *         The flash driver failed.
  */

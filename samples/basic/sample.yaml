@@ -1,0 +1,20 @@
+sample:
+  name: UBI basic
+  description: Attach, format only a blank partition, and count boots
+tests:
+  sample.ubi.basic:
+    platform_allow:
+      - native_sim
+      - nrf5340dk/nrf5340/cpuapp
+    integration_platforms:
+      - native_sim
+    tags:
+      - ubi
+    harness: console
+    harness_config:
+      type: multi_line
+      ordered: true
+      regex:
+        - "ubi: [0-9]+ blocks of [0-9]+ bytes"
+        - "boot count: [0-9]+"
+        - "done"

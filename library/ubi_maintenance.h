@@ -3,13 +3,6 @@
  * \author  Kamil Kielbasa
  * \brief   Work the device puts off until the application has time for it.
  *
- *          Erasing costs milliseconds and moving a block costs a read and a
- *          write, so neither happens on the path that asked for it. They
- *          happen here, when the application says it can afford the latency.
- *
- *          Internal to the library: the boundary in ubi_api.c has already
- *          checked what arrives here.
- *
  * \copyright Copyright (c) 2026
  *
  */
@@ -41,15 +34,27 @@
  *
  * \retval 0
  *         Done, including when there was nothing to do.
- * \retval -EINVAL
- *         No such operation.
- * \retval -ENOSPC
- *         Relocation found no block to move data into.
+ * \retval -EBADMSG
+ *         Relocation found a block it could not verify and left it where it
+ *         is.
+ * \retval -EFAULT
+ *         Relocation found a block in use that no mapping names.
  * \retval -EIO
  *         The crypto backend or the flash driver failed.
  */
 int ubi_impl_maintenance(struct ubi_device *ubi,
 			 enum ubi_maintenance_op operation, uint32_t budget,
 			 struct ubi_maintenance_result *result);
+
+/**
+ * \brief Report that no work was done, and how much is waiting.
+ *
+ * \param[in] ubi                       Attached device.
+ * \param operation                     Work asked for.
+ * \param[out] result                   Work done and still waiting.
+ */
+void ubi_impl_maintenance_report(const struct ubi_device *ubi,
+				 enum ubi_maintenance_op operation,
+				 struct ubi_maintenance_result *result);
 
 #endif /* UBI_MAINTENANCE_H */

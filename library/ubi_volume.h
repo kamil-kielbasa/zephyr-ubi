@@ -3,16 +3,8 @@
  * \author  Kamil Kielbasa
  * \brief   Volumes and the logical-to-physical mapping.
  *
- *          A volume is a name, a size in logical erase blocks, and a slice of
- *          the erase block association table. What backs each of those blocks
- *          is decided here; what is written into them is decided a layer up.
- *
  *          The volume table has a volume of its own, reachable through
- *          \ref ubi_impl_volume_by_id but never through the public API, because
- *          the record it holds is what declares the others.
- *
- *          Internal to the library: the boundary in ubi_api.c has already
- *          checked what arrives here.
+ *          \ref ubi_impl_volume_by_id but not through the public API.
  *
  * \copyright Copyright (c) 2026
  *

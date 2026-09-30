@@ -1,0 +1,57 @@
+tests:
+  # 64 blocks of 4 KiB, single-byte writes, with power cuts and failed
+  # writes injected.
+  ubi.model:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    timeout: 600
+    integration_platforms:
+      - native_sim
+  # Large blocks written 32 bytes at a time.
+  ubi.model.wbs32:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    timeout: 600
+    extra_args:
+      - DTC_OVERLAY_FILE=native_sim/wbs32_flash.overlay
+  # The widest write block UBI takes.
+  ubi.model.wbs64:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    timeout: 600
+    extra_args:
+      - DTC_OVERLAY_FILE=native_sim/wbs64_flash.overlay
+  # Every read checks its header; every fresh block may be moved at once.
+  ubi.model.verify_on_read:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    timeout: 600
+    extra_configs:
+      - CONFIG_UBI_VERIFY_ON_READ=y
+  ubi.model.no_protection:
+    platform_allow:
+      - native_sim
+    tags:
+      - ubi
+    timeout: 600
+    extra_configs:
+      - CONFIG_UBI_PROTECTION_CYCLES=0
+  # Real flash, where nothing can be injected. Prints how long an attach
+  # takes.
+  ubi.model.hardware:
+    platform_allow:
+      - nrf5340dk/nrf5340/cpuapp
+    tags:
+      - ubi
+    slow: true
+    timeout: 3600
+    extra_configs:
+      - CONFIG_UBI_TEST_MODEL_STEPS=3000

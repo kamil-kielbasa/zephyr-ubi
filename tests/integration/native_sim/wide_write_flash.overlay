@@ -1,0 +1,24 @@
+/*
+ * Copyright (c) 2026 Kamil Kiełbasa
+ * SPDX-License-Identifier: MIT
+ *
+ * native_sim with the widest write block UBI accepts, one whole header of
+ * 64 bytes, on 8 KiB pages. UBI gets 8 MiB of a flash grown to 16 MiB.
+ */
+
+&flashcontroller0 {
+	reg = <0x00000000 0x01000000>;
+};
+
+&flash0 {
+	reg = <0x00000000 0x01000000>;
+	erase-block-size = <8192>;
+	write-block-size = <64>;
+
+	partitions {
+		ubi_partition: partition@100000 {
+			label = "ubi-storage";
+			reg = <0x00100000 0x00800000>;
+		};
+	};
+};

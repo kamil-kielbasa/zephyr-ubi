@@ -1,15 +1,16 @@
 /**
- * \file    common.h
+ * \file    partition.h
  * \author  Kamil Kielbasa
- * \brief   Reaching the flash behind the library's back.
+ * \brief   The partition under test, read and damaged behind the library's
+ *          back.
  *
  * \copyright Copyright (c) 2026
  *
  */
 
 /* Header guard ------------------------------------------------------------ */
-#ifndef COMMON_H
-#define COMMON_H
+#ifndef PARTITION_H
+#define PARTITION_H
 
 /* Include files ----------------------------------------------------------- */
 
@@ -21,13 +22,10 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/storage/flash_map.h>
 
-/* PSA headers: */
-#include <psa/crypto.h>
-
 /* UBI headers: */
 #include <ubi/ubi.h>
 
-/* The one place the suite reaches into the library: its on-flash layout. */
+/* The one place the tests reach into the library: its on-flash layout. */
 #include "ubi_header.h"
 #include "ubi_private.h"
 
@@ -46,7 +44,7 @@
 /** Flash memory the partition lives on, which carries its geometry. */
 #define UBI_TEST_FLASH_NODE DT_GPARENT(UBI_TEST_PARTITION_NODE)
 
-/* Checked against the driver in suite_setup(). */
+/* Checked against the driver by partition_geometry_check(). */
 #if DT_NODE_HAS_COMPAT(UBI_TEST_FLASH_NODE, nordic_qspi_nor)
 /* nrf_qspi_nor.c pages by Kconfig and writes whole words. */
 #define UBI_TEST_PEB_SIZE CONFIG_NORDIC_QSPI_NOR_FLASH_LAYOUT_PAGE_SIZE
@@ -62,6 +60,18 @@
 
 /** What an erase leaves in every byte, on every flash these tests run on. */
 #define UBI_TEST_ERASED (0xFF)
+
+/** Flash map identifier of a partition starting half a block into the one
+ *  under test, which no flash can erase in whole blocks. Simulator only. */
+#define UBI_TEST_MISALIGNED_PARTITION_ID (0xF0)
+
+/* Variable declarations --------------------------------------------------- */
+
+/** Room for one block, shared by the helpers that rewrite a block whole. */
+extern uint8_t block_scratch[UBI_TEST_PEB_SIZE];
+
+/** Room for two blocks a test copies out and puts back later. */
+extern uint8_t saved_blocks[2][UBI_TEST_PEB_SIZE];
 
 /* Function declarations --------------------------------------------------- */
 
@@ -86,27 +96,14 @@ void partition_erase_dirty(void);
 uint32_t partition_fingerprint(void);
 
 /**
- * \brief Erase a block and give it an authentic erase counter header.
- *
- * \param ikm_key_id                    Keying material the device attaches
- *                                      with.
- * \param pnum                          Block to restamp.
- * \param image_seq                     Image the block claims.
- * \param erase_count                   Count to write into the header.
+ * \brief Copy one block of the partition out, byte for byte.
  */
-void stamp_erase_count(psa_key_id_t ikm_key_id, uint32_t pnum,
-		       uint32_t image_seq, uint64_t erase_count);
+void block_save(uint32_t pnum, uint8_t *buffer);
 
 /**
- * \brief Read the erase counter header of every block straight off the flash.
- *
- * \param ikm_key_id                    Keying material the device attaches
- *                                      with.
- * \param[out] counts                   One count per block.
- * \param peb_count                     How many blocks to read.
+ * \brief Erase one block and write back what block_save() copied out.
  */
-void erase_counts_on_flash(psa_key_id_t ikm_key_id, uint64_t *counts,
-			   uint32_t peb_count);
+void block_restore(uint32_t pnum, const uint8_t *buffer);
 
 /**
  * \brief Clear the lowest set bit of one byte, as NOR allows without an erase.
@@ -117,24 +114,12 @@ void erase_counts_on_flash(psa_key_id_t ikm_key_id, uint64_t *counts,
 void flash_clear_a_bit(const struct flash_area *flash_area, off_t at);
 
 /**
- * \brief Change one byte of a header and repair its checksum, so only the
- *        MAC can object.
+ * \brief Clear a bit in the first byte of a range that still has one.
  *
- * \param pnum                          Block to rewrite.
- * \param at                            Offset of the byte within the block.
+ * \return 1 when a byte was damaged, 0 when every byte was already zero.
  */
-void forge_header_byte(uint32_t pnum, off_t at);
-
-/**
- * \brief Clear a bit in the first \p copies volume table records found.
- *
- * \param ikm_key_id                    Keying material the device attaches
- *                                      with.
- * \param copies                        How many to damage.
- *
- * \return How many were damaged.
- */
-uint32_t corrupt_volume_tables(psa_key_id_t ikm_key_id, uint32_t copies);
+uint32_t corrupt_a_byte_at(const struct flash_area *flash_area, off_t at,
+			   size_t length);
 
 /**
  * \brief Clear a bit in the data of every block whose data starts with
@@ -162,43 +147,4 @@ uint32_t count_data_matching(const uint8_t *needle, size_t length);
  */
 uint32_t pnum_of_data_matching(const uint8_t *needle, size_t length);
 
-#if defined(CONFIG_FLASH_SIMULATOR)
-
-/**
- * \brief Fail every flash write once \p after bytes have gone through.
- */
-void flash_fail_writes_after(uint32_t after);
-
-/**
- * \brief Let writes through again.
- */
-void flash_fail_writes_never(void);
-
-/**
- * \brief Fail every erase once \p after erases have gone through.
- */
-void flash_fail_erases_after(uint32_t after);
-
-/**
- * \brief Let erases through again.
- */
-void flash_fail_erases_never(void);
-
-/**
- * \brief Read a flash simulator counter, such as \c "flash_erase_calls".
- */
-uint32_t flash_ops(const char *name);
-
-/**
- * \brief Erases the flash simulator counted on one block of the partition.
- */
-uint32_t flash_erases_of(uint32_t pnum);
-
-/**
- * \brief Put every flash simulator counter back to zero.
- */
-void flash_ops_forget(void);
-
-#endif /* CONFIG_FLASH_SIMULATOR */
-
-#endif /* COMMON_H */
+#endif /* PARTITION_H */

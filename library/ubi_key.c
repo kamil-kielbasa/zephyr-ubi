@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 /* Zephyr headers: */
 #include <zephyr/logging/log.h>
@@ -22,6 +23,8 @@
 #include <psa/crypto.h>
 
 /* UBI headers: */
+#include <ubi/ubi.h>
+
 #include "ubi_key.h"
 
 /* Module defines ---------------------------------------------------------- */
@@ -46,6 +49,9 @@ static const uint8_t label_volume_table[] = "zephyr-ubi/volume-table/v1";
  */
 static const uint8_t derivation_salt[] = "zephyr-ubi/v1";
 
+BUILD_ASSERT(sizeof(label_header) <= sizeof(label_volume_table),
+	     "the HKDF info is sized for the longer label");
+
 /* Static function declarations -------------------------------------------- */
 
 /**
@@ -57,6 +63,9 @@ static const uint8_t derivation_salt[] = "zephyr-ubi/v1";
  * \param ikm_key_id                    Key to derive from.
  * \param[in] label                     Domain separator.
  * \param label_length                  Bytes of \p label to use.
+ * \param[in] context                   Bytes that follow the label, or
+ *                                      \c NULL.
+ * \param context_size                  Bytes of \p context to use.
  * \param[out] key_id                   Receives the derived key.
  * \param[out] psa_status               Last status from the backend.
  *
@@ -68,20 +77,29 @@ static const uint8_t derivation_salt[] = "zephyr-ubi/v1";
  *         The crypto backend failed.
  */
 static int key_derive_one(psa_key_id_t ikm_key_id, const uint8_t *label,
-			  size_t label_length, psa_key_id_t *key_id,
+			  size_t label_length, const uint8_t *context,
+			  size_t context_size, psa_key_id_t *key_id,
 			  psa_status_t *psa_status);
 
 /* Static function definitions --------------------------------------------- */
 
 static int key_derive_one(psa_key_id_t ikm_key_id, const uint8_t *label,
-			  size_t label_length, psa_key_id_t *key_id,
+			  size_t label_length, const uint8_t *context,
+			  size_t context_size, psa_key_id_t *key_id,
 			  psa_status_t *psa_status)
 {
+	uint8_t info[sizeof(label_volume_table) - 1 + UBI_KEY_CONTEXT_MAX_SIZE];
 	psa_key_derivation_operation_t operation =
 		PSA_KEY_DERIVATION_OPERATION_INIT;
 	psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
 	psa_status_t status = PSA_ERROR_GENERIC_ERROR;
 	int ret = -EIO;
+
+	/* The info is the label, followed by the context if there is one. */
+	memcpy(info, label, label_length);
+
+	if (0 != context_size)
+		memcpy(&info[label_length], context, context_size);
 
 	psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
 	psa_set_key_bits(&attributes, UBI_KEY_BITS);
@@ -120,8 +138,10 @@ static int key_derive_one(psa_key_id_t ikm_key_id, const uint8_t *label,
 		goto exit;
 	}
 
-	status = psa_key_derivation_input_bytes(
-		&operation, PSA_KEY_DERIVATION_INPUT_INFO, label, label_length);
+	status = psa_key_derivation_input_bytes(&operation,
+						PSA_KEY_DERIVATION_INPUT_INFO,
+						info,
+						label_length + context_size);
 
 	if (PSA_SUCCESS != status) {
 		goto exit;
@@ -146,7 +166,8 @@ exit:
 
 /* Module interface function definitions ----------------------------------- */
 
-int ubi_impl_key_derive(psa_key_id_t ikm_key_id, psa_key_id_t *key_header,
+int ubi_impl_key_derive(psa_key_id_t ikm_key_id, const uint8_t *context,
+			size_t context_size, psa_key_id_t *key_header,
 			psa_key_id_t *key_volume_table)
 {
 	psa_status_t status = PSA_ERROR_GENERIC_ERROR;
@@ -162,12 +183,19 @@ int ubi_impl_key_derive(psa_key_id_t ikm_key_id, psa_key_id_t *key_header,
 		return -EINVAL;
 	}
 
+	if (UBI_KEY_CONTEXT_MAX_SIZE < context_size ||
+	    (NULL == context && 0 != context_size)) {
+		LOG_ERR("a key context of %zu bytes is too long or missing",
+			context_size);
+		return -EINVAL;
+	}
+
 	*key_header = PSA_KEY_ID_NULL;
 	*key_volume_table = PSA_KEY_ID_NULL;
 
 	/* Labels are separators, so the terminating NUL carries no meaning. */
 	ret = key_derive_one(ikm_key_id, label_header, sizeof(label_header) - 1,
-			     key_header, &status);
+			     context, context_size, key_header, &status);
 
 	if (0 != ret) {
 		LOG_ERR("deriving the header key failed (%d), psa_status=%d",
@@ -176,8 +204,8 @@ int ubi_impl_key_derive(psa_key_id_t ikm_key_id, psa_key_id_t *key_header,
 	}
 
 	ret = key_derive_one(ikm_key_id, label_volume_table,
-			     sizeof(label_volume_table) - 1, key_volume_table,
-			     &status);
+			     sizeof(label_volume_table) - 1, context,
+			     context_size, key_volume_table, &status);
 
 	if (0 != ret) {
 		LOG_ERR("deriving the volume table key failed (%d), "

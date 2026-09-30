@@ -9,11 +9,14 @@ project(ubi_unit)
 include(${ZEPHYR_UBI_MODULE_DIR}/cmake/warnings.cmake)
 
 target_sources(app PRIVATE
-  src/common.c
+  src/headers.c
+  src/keys.c
   src/suite.c
   src/test_header.c
+  src/test_kat.c
   src/test_key.c
   src/test_mac.c
+  src/test_volume_table.c
 )
 
 # Header serialization and key derivation have no public API of their own.

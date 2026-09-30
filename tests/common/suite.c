@@ -27,7 +27,8 @@
 #include <ubi/ubi.h>
 
 /* Test headers: */
-#include "common.h"
+#include "flash_faults.h"
+#include "partition.h"
 #include "suite.h"
 
 /* Module variables and constants ------------------------------------------ */
@@ -38,8 +39,8 @@ struct ubi_config config = { 0 };
 struct ubi_config config_wrong_key = { 0 };
 
 uint32_t events_total = 0;
-uint32_t event_count[UBI_EVENT_PEB_BAD + 1] = { 0 };
-struct ubi_event event_last[UBI_EVENT_PEB_BAD + 1] = { 0 };
+uint32_t event_count[UBI_EVENT_DATA_CORRUPT + 1] = { 0 };
+struct ubi_event event_last[UBI_EVENT_DATA_CORRUPT + 1] = { 0 };
 uint32_t state_check_count = 0;
 struct ubi_device_info last_state = { 0 };
 
@@ -112,6 +113,10 @@ void *suite_setup(void)
 
 	partition_geometry_check();
 
+#if defined(CONFIG_FLASH_SIMULATOR)
+	flash_faults_install();
+#endif
+
 	key_right = import_ikm(ikm_bytes, sizeof(ikm_bytes));
 
 	memcpy(other, ikm_bytes, sizeof(other));
@@ -143,8 +148,8 @@ void suite_before(void *fixture)
 	zassert_not_null(ubi, "no memory for a device handle");
 
 #if defined(CONFIG_FLASH_SIMULATOR)
-	flash_fail_writes_never();
-	flash_fail_erases_never();
+	flash_faults_clear();
+	flash_double_writes_forget();
 #endif
 
 	partition_erase_dirty();
@@ -156,6 +161,13 @@ void suite_after(void *fixture)
 
 	ARG_UNUSED(fixture);
 
+#if defined(CONFIG_FLASH_SIMULATOR)
+	const uint32_t double_writes = flash_double_writes();
+	const off_t double_write_at = flash_double_write_first();
+
+	flash_faults_clear();
+#endif
+
 	/* A test that stopped half-way leaves the handle attached, and its
 	 * block tables would starve the next attach of heap. */
 	if (UBI_DEVICE_MAGIC == ubi->magic)
@@ -165,6 +177,14 @@ void suite_after(void *fixture)
 	ubi = NULL;
 
 	zassert_ok(ret, "the handle left attached would not detach");
+
+#if defined(CONFIG_FLASH_SIMULATOR)
+	/* NOR takes such a write and silently corrupts what was there. */
+	zassert_equal(0, double_writes,
+		      "the library wrote %u times over bytes it had not "
+		      "erased, first at offset %ld",
+		      double_writes, (long)double_write_at);
+#endif
 }
 
 void events_forget(void)
@@ -248,11 +268,38 @@ void leb_payload(uint8_t seed, uint32_t lnum, uint8_t *buffer, size_t length)
 	pattern_fill(buffer, length, (uint8_t)(seed + lnum));
 }
 
+void volume_fill(uint32_t vol_id, uint32_t from, uint32_t to, uint8_t seed)
+{
+	uint8_t written[UBI_TEST_PAYLOAD_SIZE] = { 0 };
+
+	for (uint32_t lnum = from; lnum < to; ++lnum) {
+		leb_payload(seed, lnum, written, sizeof(written));
+		zassert_ok(ubi_leb_change(ubi, vol_id, lnum, written,
+					  sizeof(written)));
+	}
+}
+
+void volume_check(uint32_t vol_id, uint32_t from, uint32_t to, uint8_t seed)
+{
+	uint8_t expected[UBI_TEST_PAYLOAD_SIZE] = { 0 };
+	uint8_t read[UBI_TEST_PAYLOAD_SIZE] = { 0 };
+
+	for (uint32_t lnum = from; lnum < to; ++lnum) {
+		leb_payload(seed, lnum, expected, sizeof(expected));
+		memset(read, 0x00, sizeof(read));
+
+		zassert_ok(
+			ubi_leb_read(ubi, vol_id, lnum, 0, read, sizeof(read)));
+		zassert_mem_equal(expected, read, sizeof(read),
+				  "volume %u block %u lost its contents",
+				  vol_id, lnum);
+	}
+}
+
 uint32_t volume_under_load(uint32_t *vol_id)
 {
 	struct ubi_volume_config wanted = { .name = "wear", .leb_count = 0 };
 	struct ubi_device_info info = { 0 };
-	uint8_t written[UBI_TEST_PAYLOAD_SIZE] = { 0 };
 
 	zassert_ok(ubi_device_format(&config));
 	zassert_ok(ubi_device_init(ubi, &config));
@@ -262,12 +309,7 @@ uint32_t volume_under_load(uint32_t *vol_id)
 	wanted.leb_count = info.free_lebs - UBI_TEST_LOAD_FREE_LEBS;
 
 	zassert_ok(ubi_volume_create(ubi, &wanted, vol_id));
-
-	for (uint32_t lnum = 0; lnum < wanted.leb_count; ++lnum) {
-		leb_payload(UBI_TEST_LOAD_SEED, lnum, written, sizeof(written));
-		zassert_ok(ubi_leb_change(ubi, *vol_id, lnum, written,
-					  sizeof(written)));
-	}
+	volume_fill(*vol_id, 0, wanted.leb_count, UBI_TEST_LOAD_SEED);
 
 	return wanted.leb_count;
 }

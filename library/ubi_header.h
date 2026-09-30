@@ -46,7 +46,7 @@
 
 /* Defines ----------------------------------------------------------------- */
 
-/** Size of both the EC and the VID header, matching Linux UBI. */
+/** Size of both the EC and the VID header. */
 #define UBI_HEADER_SIZE (64)
 
 /** Offset of the EC header within a physical erase block. */
@@ -58,15 +58,15 @@
 /** Offset at which block data begins. */
 #define UBI_DATA_OFFSET (128)
 
-/** Bytes read at a time when checksumming a block's data area. */
-#define DATA_VERIFY_CHUNK (128)
+/** Bytes of magic each header opens with. */
+#define UBI_HEADER_MAGIC_SIZE (4)
 
 /**
  * Header format understood by this implementation.
  *
  * Bump this for any change to the field layout or to what the MAC covers.
  * The version byte is checked after the MAC verifies, so an image written by
- * a different format reports #UBI_HEADER_NOT_UBI rather than looking like
+ * a different format reports #UBI_HEADER_UNSUPPORTED rather than looking like
  * tampering.
  */
 #define UBI_HEADER_VERSION (1)
@@ -82,13 +82,16 @@ enum ubi_header_status {
 	/** Every byte reads as the flash's erased value; the block carries no
 	 *  header. */
 	UBI_HEADER_ERASED,
-	/** Magic does not match, the format version is unknown, or the block
-	 *  layout is not the one this build uses. */
+	/** Magic does not match. */
 	UBI_HEADER_NOT_UBI,
 	/** CRC mismatch: an interrupted write or bit rot. */
 	UBI_HEADER_CORRUPT,
-	/** CRC matches but the MAC does not: the header was modified. */
+	/** CRC matches but the MAC does not: the header was modified, or it
+	 *  was sealed under another key. */
 	UBI_HEADER_TAMPERED,
+	/** The MAC verifies, but the format version or the block layout is
+	 *  not the one this build uses: written by another release. */
+	UBI_HEADER_UNSUPPORTED,
 	/** The crypto backend failed; the header says nothing either way. */
 	UBI_HEADER_ERROR,
 };
@@ -190,7 +193,7 @@ int ubi_impl_header_ec_serialize(const struct ubi_ec_header *header,
  *        forged header cannot steer where UBI reads next. Once the MAC
  *        verifies, the recorded block layout is checked against the one this
  *        build uses; an authentic header describing a different layout is
- *        reported as #UBI_HEADER_NOT_UBI.
+ *        reported as #UBI_HEADER_UNSUPPORTED.
  *
  * \param[in] buffer                    Bytes read from flash.
  * \param buffer_size                   Bytes available at \p buffer.

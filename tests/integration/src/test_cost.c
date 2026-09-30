@@ -20,7 +20,9 @@
 #include <ubi/ubi.h>
 
 /* Test headers: */
-#include "common.h"
+#include "flash_stats.h"
+#include "forge.h"
+#include "partition.h"
 #include "suite.h"
 
 /* Module variables and constants ------------------------------------------ */
@@ -50,10 +52,11 @@ ZTEST(ubi_cost, test_attach_reads_the_blocks_and_writes_nothing)
 
 	/* Every header, every volume table record, the headers of this image
 	 * a second time, and every sealed payload. */
-	const uint32_t reads = info.peb_count + UBI_VOLUME_TABLE_LEB_COUNT +
-			       mapped_pebs(&info) + info.free_pebs +
-			       leb_count * DIV_ROUND_UP(UBI_TEST_PAYLOAD_SIZE,
-							DATA_VERIFY_CHUNK);
+	const uint32_t reads =
+		info.peb_count + UBI_VOLUME_TABLE_LEB_COUNT +
+		mapped_pebs(&info) + info.free_pebs +
+		leb_count * DIV_ROUND_UP(UBI_TEST_PAYLOAD_SIZE,
+					 CONFIG_UBI_IO_CHUNK_SIZE);
 
 	flash_ops_forget();
 	zassert_ok(ubi_device_init(ubi, &config));
@@ -148,10 +151,14 @@ ZTEST(ubi_cost_reads, test_a_read_goes_straight_to_the_block)
 /*
  * Given: a device with one block released and waiting to be reclaimed.
  * When:  a single reclaim step runs.
- * Then:  it costs one erase and one header, and nothing more goes back down.
+ * Then:  it costs one erase and one header, plus a write over the magic of
+ *        each of the two headers the block carried when the erase is set to
+ *        invalidate them first, and nothing more goes back down.
  */
 ZTEST(ubi_cost, test_reclaiming_costs_one_erase_and_one_header)
 {
+	const uint32_t invalidations =
+		IS_ENABLED(CONFIG_UBI_ERASE_INVALIDATES_HEADERS) ? 2 : 0;
 	struct ubi_maintenance_result result = { 0 };
 	uint32_t vol_id = UBI_VOL_ID_INVALID;
 	uint8_t written[UBI_TEST_PAYLOAD_SIZE] = { 0 };
@@ -166,7 +173,7 @@ ZTEST(ubi_cost, test_reclaiming_costs_one_erase_and_one_header)
 
 	zassert_equal(1, result.performed);
 	zassert_equal(1, flash_ops("flash_erase_calls"));
-	zassert_equal(1, flash_ops("flash_write_calls"),
+	zassert_equal(1 + invalidations, flash_ops("flash_write_calls"),
 		      "the erase counter header is all that goes back down");
 
 	zassert_ok(ubi_device_deinit(ubi));
@@ -175,8 +182,9 @@ ZTEST(ubi_cost, test_reclaiming_costs_one_erase_and_one_header)
 /*
  * Given: a device that lost one of its two volume table copies outright.
  * When:  a repair replaces it.
- * Then:  it costs one erase, because the replacement comes off the free pool
- *        already erased and a commit must not erase what it was handed.
+ * Then:  it costs one erase, that of the block the surviving copy moves out
+ *        of: both copies go into blocks the free pool hands over erased, and
+ *        a commit must not erase what it was handed.
  */
 ZTEST(ubi_cost, test_replacing_a_lost_volume_table_copy_costs_one_erase)
 {
@@ -189,9 +197,12 @@ ZTEST(ubi_cost, test_replacing_a_lost_volume_table_copy_costs_one_erase)
 	zassert_ok(ubi_device_deinit(ubi));
 
 	/* A format puts the copies in the first blocks; restamping the last
-	 * of them wipes it, headers and all. */
-	stamp_erase_count(config.ikm_key_id, UBI_VOLUME_TABLE_LEB_COUNT - 1,
-			  info.image_seq, info.max_erase_count);
+	 * of them wipes it, headers and all. The block after it is stamped
+	 * too, so both copies have an erased block to go to. */
+	for (uint32_t pnum = UBI_VOLUME_TABLE_LEB_COUNT - 1;
+	     pnum <= UBI_VOLUME_TABLE_LEB_COUNT; ++pnum)
+		stamp_erase_count(config.ikm_key_id, pnum, info.image_seq,
+				  info.max_erase_count);
 
 	zassert_ok(ubi_device_init(ubi, &config));
 	zassert_equal(1, event_count[UBI_EVENT_VOLUME_TABLE_DEGRADED],

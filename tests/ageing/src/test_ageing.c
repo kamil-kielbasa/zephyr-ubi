@@ -12,7 +12,6 @@
 /* Standard library headers: */
 #include <inttypes.h>
 #include <stdint.h>
-#include <string.h>
 
 /* Zephyr headers: */
 #include <zephyr/sys/util.h>
@@ -22,10 +21,16 @@
 #include <ubi/ubi.h>
 
 /* Test headers: */
-#include "common.h"
+#include "flash_stats.h"
+#include "forge.h"
+#include "partition.h"
 #include "suite.h"
+#include "table_copies.h"
 
 /* Module defines ---------------------------------------------------------- */
+
+/** Seed of what churn() writes. */
+#define CHURN_SEED (0xF0)
 
 /** Blocks a round may release: the rewritten block's old copy, and the
  *  block relocation moved off. */
@@ -46,12 +51,6 @@
  */
 static void churn(uint32_t vol_id, uint32_t rounds, uint32_t relocations);
 
-/**
- * \brief Fail unless logical blocks 1 to \p leb_count - 1 still hold what
- *        volume_under_load() wrote.
- */
-static void cold_blocks_check(uint32_t vol_id, uint32_t leb_count);
-
 /* Module variables and constants ------------------------------------------ */
 
 UBI_TEST_SUITE(ubi_ageing);
@@ -63,7 +62,7 @@ static void churn(uint32_t vol_id, uint32_t rounds, uint32_t relocations)
 	struct ubi_maintenance_result result = { 0 };
 	uint8_t written[UBI_TEST_PAYLOAD_SIZE] = { 0 };
 
-	pattern_fill(written, sizeof(written), 0xF0);
+	pattern_fill(written, sizeof(written), CHURN_SEED);
 
 	for (uint32_t round = 0; round < rounds; ++round) {
 		zassert_ok(ubi_leb_change(ubi, vol_id, 0, written,
@@ -72,23 +71,6 @@ static void churn(uint32_t vol_id, uint32_t rounds, uint32_t relocations)
 					   RECLAIM_PER_ROUND, &result));
 		zassert_ok(ubi_maintenance(ubi, UBI_MAINTENANCE_RELOCATE,
 					   relocations, &result));
-	}
-}
-
-static void cold_blocks_check(uint32_t vol_id, uint32_t leb_count)
-{
-	uint8_t expected[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-	uint8_t read[UBI_TEST_PAYLOAD_SIZE] = { 0 };
-
-	for (uint32_t lnum = 1; lnum < leb_count; ++lnum) {
-		leb_payload(UBI_TEST_LOAD_SEED, lnum, expected,
-			    sizeof(expected));
-		memset(read, 0x00, sizeof(read));
-
-		zassert_ok(
-			ubi_leb_read(ubi, vol_id, lnum, 0, read, sizeof(read)));
-		zassert_mem_equal(expected, read, sizeof(read),
-				  "block %u lost its contents", lnum);
 	}
 }
 
@@ -121,11 +103,11 @@ ZTEST(ubi_ageing, test_levelling_keeps_the_wear_within_its_threshold)
 		     "wear ran from %u to %u", after.min_erase_count,
 		     after.max_erase_count);
 
-	cold_blocks_check(vol_id, leb_count);
+	volume_check(vol_id, 1, leb_count, UBI_TEST_LOAD_SEED);
 	zassert_ok(ubi_device_deinit(ubi));
 
 	zassert_ok(ubi_device_init(ubi, &config));
-	cold_blocks_check(vol_id, leb_count);
+	volume_check(vol_id, 1, leb_count, UBI_TEST_LOAD_SEED);
 	zassert_ok(ubi_device_deinit(ubi));
 }
 
@@ -205,8 +187,8 @@ ZTEST(ubi_ageing, test_levelling_moves_the_block_with_the_most_life_left)
  * Given: hot blocks worn hard, and then a flood of barely used free blocks
  *        that makes every hot block look worth relocating.
  * When:  the hot volume carries on being rewritten with levelling on.
- * Then:  levelling moves only the volume table copies, which nobody
- *        rewrites, and every other erase is one a rewrite asked for.
+ * Then:  levelling moves no block but a volume table copy, and every other
+ *        erase is one a rewrite asked for.
  */
 ZTEST(ubi_ageing, test_levelling_leaves_freshly_written_blocks_alone)
 {
@@ -215,9 +197,12 @@ ZTEST(ubi_ageing, test_levelling_leaves_freshly_written_blocks_alone)
 					       .leb_count = HOT_LEBS };
 	struct ubi_maintenance_result result = { 0 };
 	struct ubi_device_info info = { 0 };
+	uint32_t tables_before[UBI_VOLUME_TABLE_LEB_COUNT] = { 0 };
+	uint32_t tables_after[UBI_VOLUME_TABLE_LEB_COUNT] = { 0 };
 	uint32_t cold_id = UBI_VOL_ID_INVALID;
 	uint32_t hot_id = UBI_VOL_ID_INVALID;
 	uint32_t relocations = 0;
+	uint32_t tables_moved = 0;
 	uint8_t written[UBI_TEST_PAYLOAD_SIZE] = { 0 };
 
 	zassert_ok(ubi_device_format(&config));
@@ -259,6 +244,8 @@ ZTEST(ubi_ageing, test_levelling_leaves_freshly_written_blocks_alone)
 
 	const uint64_t erases_before = info.total_erase_count;
 
+	volume_table_copy_blocks(config.ikm_key_id, tables_before);
+
 	for (uint32_t round = 0; round < CONFIG_UBI_TEST_PROTECTION_ROUNDS;
 	     ++round) {
 		zassert_ok(ubi_leb_change(ubi, hot_id, round % HOT_LEBS,
@@ -270,13 +257,30 @@ ZTEST(ubi_ageing, test_levelling_leaves_freshly_written_blocks_alone)
 		relocations += result.performed;
 	}
 
-	zassert_equal(UBI_VOLUME_TABLE_LEB_COUNT, relocations,
-		      "hot data was carried off");
+	volume_table_copy_blocks(config.ikm_key_id, tables_after);
+
+	for (uint32_t lnum = 0; lnum < UBI_VOLUME_TABLE_LEB_COUNT; ++lnum) {
+		if (tables_before[lnum] != tables_after[lnum])
+			tables_moved += 1;
+	}
+
+	zassert_equal(tables_moved, relocations, "hot data was carried off");
 
 	zassert_ok(ubi_device_get_info(ubi, &info));
 	zassert_equal(CONFIG_UBI_TEST_PROTECTION_ROUNDS + relocations,
 		      info.total_erase_count - erases_before,
 		      "an erase no rewrite asked for is the cost of shuttling");
+
+	/* The copies it moved are the only ones there are. */
+	zassert_ok(ubi_device_deinit(ubi));
+	events_forget();
+	zassert_ok(ubi_device_init(ubi, &config));
+	zassert_equal(0, event_count[UBI_EVENT_VOLUME_TABLE_CORRUPT]);
+	zassert_equal(0, event_count[UBI_EVENT_VOLUME_TABLE_DEGRADED]);
+	zassert_ok(ubi_device_get_info(ubi, &info));
+	zassert_equal(1, info.volume_count,
+		      "the volume table has to survive being moved");
+	zassert_ok(ubi_volume_find(ubi, hot.name, &hot_id));
 
 	zassert_ok(ubi_device_deinit(ubi));
 }
@@ -288,31 +292,53 @@ ZTEST(ubi_ageing, test_levelling_leaves_freshly_written_blocks_alone)
  *        every block takes.
  * When:  one block is rewritten a lifetime over with levelling on.
  * Then:  what each erase counter header gained is exactly what the flash
- *        took, and the counts on the flash stay within the threshold.
+ *        took, the device's total and the rewritten block's count say the
+ *        same, and the counts on the flash stay within the threshold.
  */
 ZTEST(ubi_ageing, test_the_wear_ubi_records_is_the_wear_the_flash_took)
 {
+	struct ubi_device_info info_before = { 0 };
+	struct ubi_device_info info_after = { 0 };
 	uint64_t before[UBI_TEST_PEB_COUNT] = { 0 };
 	uint64_t after[UBI_TEST_PEB_COUNT] = { 0 };
+	uint8_t churned[UBI_TEST_PAYLOAD_SIZE] = { 0 };
+	uint64_t erased = 0;
 	uint64_t least = UINT64_MAX;
 	uint64_t most = 0;
 	uint32_t vol_id = UBI_VOL_ID_INVALID;
 
 	zassert_true(0 < pool_ready(&vol_id));
+	zassert_ok(ubi_device_get_info(ubi, &info_before));
 
 	erase_counts_on_flash(config.ikm_key_id, before, ARRAY_SIZE(before));
 	flash_ops_forget();
 
 	churn(vol_id, CONFIG_UBI_TEST_LIFETIME_ROUNDS, LEVELLING_ON);
 
+	zassert_ok(ubi_device_get_info(ubi, &info_after));
 	erase_counts_on_flash(config.ikm_key_id, after, ARRAY_SIZE(after));
 
 	for (uint32_t pnum = 0; pnum < ARRAY_SIZE(after); ++pnum) {
-		zassert_equal(after[pnum] - before[pnum], flash_erases_of(pnum),
-			      "block %u", pnum);
+		const uint64_t gained = after[pnum] - before[pnum];
+
+		zassert_equal(gained, flash_erases_of(pnum), "block %u", pnum);
+		erased += gained;
 		least = MIN(least, after[pnum]);
 		most = MAX(most, after[pnum]);
 	}
+
+	zassert_equal(erased,
+		      info_after.total_erase_count -
+			      info_before.total_erase_count,
+		      "the device's total has to add up to the flash's");
+
+	pattern_fill(churned, sizeof(churned), CHURN_SEED);
+
+	const uint32_t churned_pnum =
+		pnum_of_data_matching(churned, sizeof(churned));
+
+	zassert_equal(after[churned_pnum], leb_wear(vol_id, 0),
+		      "a block's count has to be the one on its header");
 
 	zassert_true(most - least <= CONFIG_UBI_WEAR_LEVELING_THRESHOLD,
 		     "the flash was worn from %" PRIu64 " to %" PRIu64, least,

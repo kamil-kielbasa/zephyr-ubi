@@ -3,11 +3,9 @@
  * \author  Kamil Kielbasa
  * \brief   Unsorted Block Images (UBI) library-internal types.
  *
- *          Private to the library. Consumers include \c <ubi/ubi.h>, where
- *          \ref ubi_device is an opaque forward declaration.
- *
- *          Everything whose size follows the partition lives behind a
- *          pointer and is taken from the heap when the device attaches.
+ *          Consumers see \ref ubi_device as an opaque declaration. Everything
+ *          whose size follows the partition lives behind a pointer and is
+ *          taken from the heap when the device attaches.
  *
  * \copyright Copyright (c) 2026
  *
@@ -38,12 +36,7 @@
 
 /* Defines ----------------------------------------------------------------- */
 
-/**
- * "UBI$" in ASCII, following the on-flash magics "UBI#" and "UBI!".
- *
- * Never written to the flash; it only marks an attached handle in RAM, so
- * that operating on uninitialised storage is caught rather than obeyed.
- */
+/** "UBI$" in ASCII. Never written to the flash; marks an attached handle. */
 #define UBI_DEVICE_MAGIC (0x55424924UL)
 
 /** Entry in \ref ubi_volume.eba that has no physical block behind it. */
@@ -52,48 +45,52 @@
 /** Fewer blocks than this leaves no room to work in. */
 #define UBI_MIN_PEB_COUNT (4)
 
-/** Block numbers are kept as 16-bit values, and one is spent on the
- *  unmapped sentinel. */
+/** Block numbers are 16-bit, and one value is the unmapped sentinel. */
 #define UBI_MAX_PEB_COUNT (UINT16_MAX - 1)
 
-/** Linux UBI's 31-bit bound. The flash field is 64-bit, the RAM copy 32-bit. */
+/** Erase counts stop here: the flash field is 64-bit, the RAM copy 32-bit. */
 #define UBI_MAX_ERASE_COUNT (0x7FFFFFFFUL)
 
-/** Share of the partition that may be corrupted before attach gives up,
- *  and the floor Linux UBI applies to it on a small partition. */
-#define CORRUPT_PEB_SHARE (20)
-#define CORRUPT_PEB_FLOOR (8)
+/** Erase count of a block whose header could not be read, until attach
+ *  gives it the mean of the others. Above any real count. */
+#define UBI_ERASE_COUNT_UNKNOWN (UINT32_MAX)
+
+/** Bytes of \ref ubi_blocks.named for \p peb_count blocks, one bit each. */
+#define UBI_NAMED_SIZE(peb_count) DIV_ROUND_UP((peb_count), BITS_PER_BYTE)
 
 /* Types and type definitions ---------------------------------------------- */
 
 /**
- * \brief Lifecycle state of a physical erase block.
+ * \brief Lifecycle state of a physical erase block, held in RAM only.
  */
 enum ubi_peb_state {
-	/** Contents unknown: never used, or left by an earlier image. Must be
-	 *  erased and stamped before it can serve. */
+	/** No usable erase counter header: blank, left by an earlier image or
+	 *  damaged. Erased and stamped before use. */
 	UBI_PEB_UNKNOWN = 0,
-	/** Erased and carrying a valid EC header; allocatable with no erase. */
+	/** Erased and stamped; allocatable with no erase. */
 	UBI_PEB_FREE,
-	/** Carries a valid VID header and backs a logical erase block. */
+	/** Backs a logical erase block. */
 	UBI_PEB_MAPPED,
 	/** Released by its logical block, awaiting #UBI_MAINTENANCE_RECLAIM. */
 	UBI_PEB_RECLAIM,
-	/** Its erase counter header verified but the volume identifier header
-	 *  behind it did not, and the data area is not blank. Preserved rather
-	 *  than erased, so that whatever it still holds can be looked at. */
+	/** Valid erase counter header over a damaged volume identifier header
+	 *  and data that is not blank. Kept for what it holds. */
 	UBI_PEB_CORRUPT,
-	/** Refused a write or an erase. Out of service, but
-	 *  #UBI_MAINTENANCE_REPAIR will give it one more chance. */
+	/** Refused a write or an erase. #UBI_MAINTENANCE_REPAIR gives it one
+	 *  more chance. */
 	UBI_PEB_BAD,
-	/** It refused again. No more chances until the next attach, so that a
-	 *  block which is genuinely finished stops costing an erase every
-	 *  time the application asks for repairs. Held in RAM only, like
-	 *  #UBI_PEB_BAD, so a wrong key never condemns a block permanently. */
+	/** Refused again; out of service until the next attach. */
 	UBI_PEB_WORN_OUT,
+	/** Backs a logical erase block relocation could not read or verify.
+	 *  Never moved again; reclaimed once its logical block lets go. */
+	UBI_PEB_ERRONEOUS,
+	/** Let go of by an unmap, possibly the newest copy of its logical
+	 *  block. Erased after the copies a change left, and with every other
+	 *  copy of its logical block. */
+	UBI_PEB_UNMAPPED,
 };
 
-BUILD_ASSERT(UBI_PEB_WORN_OUT <= UINT8_MAX,
+BUILD_ASSERT(UBI_PEB_UNMAPPED <= UINT8_MAX,
 	     "block states must fit the byte they are stored in");
 
 /**
@@ -106,11 +103,9 @@ struct ubi_geometry {
 	uint32_t peb_size;
 	/** Bytes usable per logical erase block. */
 	uint32_t leb_size;
-	/** Write granularity of the underlying flash. */
+	/** Write granularity of the flash. */
 	uint32_t write_block_size;
-	/** Byte an erase leaves behind. Reported by the driver rather than
-	 *  assumed to be 0xFF, and used both to recognise a blank block and to
-	 *  pad a write up to the write granularity. */
+	/** Byte an erase leaves behind, as the driver reports it. */
 	uint8_t erase_value;
 };
 
@@ -144,17 +139,10 @@ struct ubi_volume {
 	uint32_t vol_id;
 	/** Logical erase blocks reserved for this volume. */
 	uint32_t leb_count;
-	/** NULL-terminated volume name. */
+	/** NUL-terminated volume name. */
 	char name[UBI_VOLUME_NAME_MAX_LEN + 1];
-	/**
-	 * Erase block association table: \p leb_count entries indexed by
-	 * logical block number, each holding a physical block number or
-	 * #UBI_LEB_UNMAPPED.
-	 *
-	 * Points into \ref ubi_volumes.eba_pool. Linux UBI indexes a flat
-	 * array by logical block number too, and it makes lookup O(1) with no
-	 * allocation.
-	 */
+	/** Physical block behind each logical block, or #UBI_LEB_UNMAPPED.
+	 *  Points into \ref ubi_volumes.eba_pool. */
 	uint16_t *eba;
 };
 
@@ -164,95 +152,97 @@ struct ubi_volume {
 struct ubi_volumes {
 	/** Volumes currently defined, occupying the first \ref entries. */
 	uint32_t count;
-	/** Highest volume identifier ever handed out. Monotonic, so an
-	 *  identifier is never reused after its volume is removed. */
+	/** Next volume identifier; identifiers are never reused. */
 	uint32_t id_watermark;
-	/** Revision of the on-flash record, incremented on every change. */
+	/** Revision of the volume table record in force. */
 	uint32_t revision;
 	/** Volumes as reconstructed at attach. */
 	struct ubi_volume entries[CONFIG_UBI_MAX_NR_OF_VOLUMES];
-	/** Storage carved up between their \c eba arrays, one entry per
-	 *  physical erase block. Nothing larger can be needed: a mapped
-	 *  logical block occupies a physical one. */
+	/** Storage the \c eba arrays are carved from, one entry per physical
+	 *  block: a mapped logical block occupies a physical one. */
 	uint16_t *eba_pool;
-	/** Entries of \ref eba_pool already handed out. */
+	/** Entries of \ref eba_pool handed out. */
 	uint32_t eba_used;
 };
 
 /**
- * \brief The volume that holds the volume table record, and what attach
- *        learned about its copies.
+ * \brief The volume that holds the volume table record, and its copies.
  *
- *        An ordinary volume in every respect the mapping cares about, which
- *        is why it is one, but it stands apart from \ref ubi_volumes: it has
- *        to be reachable before the record that declares those entries has
- *        been read, it must not be visible to the application, and its
- *        mapping cannot come from a pool that formatting never allocates.
+ *        Kept apart from \ref ubi_volumes: it has to be reachable before the
+ *        record declaring the others is read, and is not the application's.
  */
 struct ubi_volume_table {
 	/** The volume itself, for the ordinary lookup path. */
 	struct ubi_volume volume;
-	/** Physical block holding each copy, indexed by copy number. */
+	/** Physical block holding each copy, by copy number. */
 	uint16_t eba[UBI_VOLUME_TABLE_LEB_COUNT];
 	/** Sequence number each copy carries. */
 	uint64_t sqnum[UBI_VOLUME_TABLE_LEB_COUNT];
-	/** Which copy is in force. The other one is the copy an update
-	 *  overwrites first, so that a complete copy always survives. */
+	/** Copy in force; an update writes the other one first. */
 	uint32_t current;
-	/** The copies do not say the same thing, or one of them is missing,
-	 *  so a single erase would cost a revision. Cleared by
-	 *  #UBI_MAINTENANCE_REPAIR and by any update, since both write every
-	 *  copy. */
+	/** The copies disagree or one is missing, so one erase would cost a
+	 *  revision. Cleared by #UBI_MAINTENANCE_REPAIR and any update. */
 	bool degraded;
 };
 
 /**
- * \brief Per-block bookkeeping, rebuilt from the flash on every attach.
- *
- *        Both arrays are indexed by physical block number, so their size
- *        follows the erase block count rather than the size of the flash.
+ * \brief Per-block bookkeeping, rebuilt from the flash on every attach and
+ *        indexed by physical block number.
  */
 struct ubi_blocks {
-	/** Lifecycle state of every physical erase block, holding values of
-	 *  \ref ubi_peb_state narrowed to a byte. */
+	/** Lifecycle state, a \ref ubi_peb_state in a byte. */
 	uint8_t *state;
-	/** Erase count of every physical erase block, from its EC header.
-	 *  The flash field is 64-bit, but no flash survives more than a few
-	 *  million erases, so 32 bits are kept in RAM. */
+	/** Erase count, from the erase counter header at attach. */
 	uint32_t *erase_count;
-	/** Erases still owed to a block before levelling may move it. Counts
-	 *  down on every erase anywhere and lives only in RAM. */
+	/** Erases still owed before levelling may move the block. */
 	uint8_t *protect;
+	/** One bit per block for the self-check; only with
+	 *  \c CONFIG_UBI_SELF_CHECKS. */
+	uint8_t *named;
 };
 
 /**
- * \brief An attached UBI device.
- *
- *        Declared opaque in the public header; this is its real layout.
+ * \brief Room to build and decode a volume table record in, taken from the
+ *        heap while the partition is open.
+ */
+struct ubi_scratch {
+	/** A record being built, or the one attach adopted. */
+	struct ubi_volume_table_record record;
+	/** One copy as it sits on the flash: its VID header and data area. */
+	uint8_t io[UBI_HEADER_SIZE + UBI_VOLUME_TABLE_DATA_MAX_SIZE];
+};
+
+/**
+ * \brief An attached UBI device; opaque in the public header.
  */
 struct ubi_device {
-	/** #UBI_DEVICE_MAGIC once attached. Guards against operating on
-	 *  uninitialised storage and against attaching the same handle
-	 *  twice. */
+	/** #UBI_DEVICE_MAGIC once attached. */
 	uint32_t magic;
 
 	/** Managed partition, open for the lifetime of the attachment. */
 	const struct flash_area *flash_area;
 
-	/** Identifies this image; blocks carrying any other value are
-	 *  foreign and treated as #UBI_PEB_UNKNOWN. */
+	/** Identifies this image; blocks carrying another one are foreign. */
 	uint32_t image_seq;
 
-	/** Highest sequence number seen or issued so far. Reported as
-	 *  \ref ubi_device_info.global_sqnum. */
-	uint64_t global_sqnum;
+	/** Highest sequence number found at attach or issued since. */
+	uint64_t max_sqnum;
 
-	/** Metadata writes since the state callback was last consulted. */
+	/** Flash writes since the state callback was last consulted. */
 	uint32_t writes_since_check;
 
-	/** Set once the state callback has withdrawn its trust. Latched: only
-	 *  a fresh attach clears it. */
+	/** The state callback withdrew its trust; only an attach clears it. */
 	bool untrusted;
+
+	/** A block could not be erased; only an attach clears it. */
+	bool read_only;
+
+	/** A callback runs, holding the lock the caller would take again. */
+	bool in_callback;
+
+	/** The flash refused a write over a header; erases skip invalidation
+	 *  until the next attach. */
+	bool invalidation_refused;
 
 	/** Serialises every public operation on this device. */
 	struct k_mutex lock;
@@ -274,6 +264,26 @@ struct ubi_device {
 
 	/** State and wear of every physical erase block. */
 	struct ubi_blocks blocks;
+
+	/** Room for volume table records. */
+	struct ubi_scratch *scratch;
 };
+
+/* Module interface function declarations ---------------------------------- */
+
+/**
+ * \brief Take the next sequence number. A write that fails still spends it,
+ *        so no two headers carry the same number.
+ *
+ * \param[in,out] ubi                   Device issuing the number.
+ *
+ * \return The number.
+ */
+static inline uint64_t ubi_impl_sqnum_next(struct ubi_device *ubi)
+{
+	ubi->max_sqnum += 1;
+
+	return ubi->max_sqnum;
+}
 
 #endif /* UBI_PRIVATE_H */

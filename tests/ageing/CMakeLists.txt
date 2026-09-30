@@ -9,10 +9,21 @@ project(ubi_ageing)
 include(${ZEPHYR_UBI_MODULE_DIR}/cmake/warnings.cmake)
 
 target_sources(app PRIVATE
-  ../common/common.c
+  ../common/forge.c
+  ../common/partition.c
   ../common/suite.c
+  ../common/table_copies.c
   src/test_ageing.c
 )
+
+# The flash simulator's faults and counters, and a device that refuses reads.
+if(CONFIG_FLASH_SIMULATOR)
+  target_sources(app PRIVATE
+    ../common/flash_faults.c
+    ../common/flash_shim.c
+    ../common/flash_stats.c
+  )
+endif()
 
 target_include_directories(app PRIVATE
   ${ZEPHYR_UBI_MODULE_DIR}/library

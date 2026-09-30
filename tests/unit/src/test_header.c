@@ -26,7 +26,7 @@
 #include "ubi_key.h"
 
 /* Test headers: */
-#include "common.h"
+#include "headers.h"
 #include "suite.h"
 
 /* Module interface function definitions ----------------------------------- */
@@ -181,8 +181,9 @@ ZTEST(ubi_unit, test_authentic_header_with_foreign_layout_is_refused)
 	zassert_ok(ubi_impl_header_ec_serialize(&header, key_header, TEST_PNUM,
 						buffer, sizeof(buffer)));
 
-	/* The MAC verifies, but this build cannot address that layout. */
-	zassert_equal(UBI_HEADER_NOT_UBI,
+	/* The MAC verifies, but this build cannot address that layout, and it
+	 * says so rather than calling the block foreign. */
+	zassert_equal(UBI_HEADER_UNSUPPORTED,
 		      ubi_impl_header_ec_parse(buffer, sizeof(buffer),
 					       key_header, TEST_PNUM,
 					       TEST_ERASE_VALUE, NULL));

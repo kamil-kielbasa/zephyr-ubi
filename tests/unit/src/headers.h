@@ -1,28 +1,24 @@
 /**
- * \file    common.h
+ * \file    headers.h
  * \author  Kamil Kielbasa
- * \brief   Fixed inputs and the few helpers the unit tests share.
+ * \brief   Fixed header inputs and the byte-level helper the unit tests
+ *          share.
  *
- *          Neither header serialization nor key derivation has a public API
- *          of its own, so the tests reach them through the library's internal
- *          headers. Nothing is added to the library to make it testable.
+ *          Header serialization has no public API, so the tests reach it
+ *          through the library's internal headers.
  *
  * \copyright Copyright (c) 2026
  *
  */
 
 /* Header guard ------------------------------------------------------------ */
-#ifndef COMMON_H
-#define COMMON_H
+#ifndef HEADERS_H
+#define HEADERS_H
 
 /* Include files ----------------------------------------------------------- */
 
 /* Standard library headers: */
-#include <stddef.h>
 #include <stdint.h>
-
-/* PSA headers: */
-#include <psa/crypto.h>
 
 /* UBI headers: */
 #include "ubi_header.h"
@@ -46,31 +42,14 @@
 
 /* Variable declarations --------------------------------------------------- */
 
-/** Keying material every derivation in the suite starts from. */
-extern const uint8_t test_ikm[32];
-
 /** A block straight out of an erase. */
 extern const uint8_t erased_block[UBI_HEADER_SIZE];
 
 /* Function declarations --------------------------------------------------- */
 
 /**
- * \brief Import keying material as a PSA derivation key.
- */
-psa_key_id_t import_ikm(const uint8_t *ikm, size_t length,
-			psa_key_usage_t usage);
-
-/**
- * \brief Fingerprint a derived key by authenticating a fixed message with it.
- *
- *        Derived keys are not exportable, so this is how two of them are
- *        compared for equality.
- */
-void key_fingerprint(psa_key_id_t key_id, uint8_t *MAC, size_t mac_size);
-
-/**
  * \brief Recompute the CRC so that only the MAC can flag a change.
  */
 void fix_crc(uint8_t *buffer);
 
-#endif /* COMMON_H */
+#endif /* HEADERS_H */

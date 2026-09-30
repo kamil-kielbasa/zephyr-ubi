@@ -10,8 +10,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  twister:
+  native_sim:
+    name: native_sim (${{ matrix.name }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc
+            args: ''
+          - name: clang
+            args: ''
+            toolchain: host/llvm
+          - name: sanitizers
+            args: --enable-asan --enable-ubsan
+          # Twister's own report covers the module; the step below narrows
+          # it to the library. Naming gcov keeps twister from looking up a
+          # toolchain variant nobody set.
+          - name: coverage
+            args: >-
+              --coverage --coverage-tool gcovr --gcov-tool gcov
+              --coverage-basedir . --coverage-formats txt
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -19,6 +38,13 @@ jobs:
           # Has to match "self: path:" in west.yml, or west will not find
           # this repository in the workspace it is about to create.
           path: zephyr-ubi
+
+      # Skipped tests, files of 800 lines, results cast to (void) and
+      # functions defined out of their declared order.
+      - name: Check the project rules
+        if: matrix.name == 'gcc'
+        working-directory: zephyr-ubi
+        run: python3 scripts/check_rules.py
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -37,14 +63,129 @@ jobs:
           sudo apt-get install --no-install-recommends -y gcc-multilib \
             g++-multilib
 
+      - name: Switch to clang
+        if: matrix.toolchain
+        run: |
+          sudo apt-get install --no-install-recommends -y clang lld llvm
+          echo "ZEPHYR_TOOLCHAIN_VARIANT=${{ matrix.toolchain }}" >> "$GITHUB_ENV"
+
+      - name: Install gcovr
+        if: matrix.name == 'coverage'
+        run: pip install gcovr
+
       - name: Build and run every configuration
         working-directory: zephyr-ubi
-        run: west twister -T tests -p native_sim --inline-logs
+        run: >-
+          west twister -T tests -T samples -p native_sim --enable-slow
+          --inline-logs ${{ matrix.args }}
 
-      - name: Keep the report
+      - name: Report what the tests reach of the library
+        if: matrix.name == 'coverage'
+        working-directory: zephyr-ubi
+        run: |
+          mkdir -p coverage
+          gcovr -r . --gcov-executable gcov --filter 'library/' \
+            --txt coverage/library.txt --html-details coverage/index.html \
+            twister-out
+          cat coverage/library.txt
+          {
+            echo '```'
+            cat coverage/library.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: twister-report
-          path: zephyr-ubi/twister-out/twister.xml
+          name: twister-${{ matrix.name }}
+          path: |
+            zephyr-ubi/twister-out/twister.xml
+            zephyr-ubi/coverage/
           if-no-files-found: ignore
+
+  nrf5340dk:
+    name: nRF5340 DK (build only)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          path: zephyr-ubi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up the Zephyr workspace
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: zephyr-ubi
+          toolchains: arm-zephyr-eabi
+
+      # The hardware scenarios are slow to run, not to build.
+      - name: Build every configuration
+        working-directory: zephyr-ubi
+        run: >-
+          west twister -T tests -T samples -p nrf5340dk/nrf5340/cpuapp
+          --enable-slow --build-only --inline-logs
+
+  stack:
+    name: Stack (Cortex-M33 under QEMU)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          path: zephyr-ubi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # QEMU comes with the SDK's host tools.
+      - name: Set up the Zephyr workspace
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: zephyr-ubi
+          toolchains: arm-zephyr-eabi
+
+      - name: Measure the stack every call uses
+        working-directory: zephyr-ubi
+        run: >-
+          west twister -T tests/stack -p mps2/an521/cpu0 --inline-logs
+
+  fuzz:
+    name: Fuzz (libFuzzer)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          path: zephyr-ubi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up the Zephyr workspace
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: zephyr-ubi
+          toolchains: x86_64-zephyr-elf
+
+      # libFuzzer's runtime comes in a package of its own.
+      - name: Switch to clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang lld llvm \
+            libclang-rt-18-dev
+          echo "ZEPHYR_TOOLCHAIN_VARIANT=host/llvm" >> "$GITHUB_ENV"
+
+      - name: Fuzz everything read off the flash
+        working-directory: zephyr-ubi
+        run: >-
+          west twister -T tests/fuzz -p native_sim/native/64 --inline-logs

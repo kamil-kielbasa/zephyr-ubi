@@ -22,11 +22,13 @@
 #include <psa/crypto.h>
 
 /* UBI headers: */
+#include <ubi/ubi.h>
+
 #include "ubi_header.h"
 #include "ubi_key.h"
 
 /* Test headers: */
-#include "common.h"
+#include "keys.h"
 #include "suite.h"
 
 /* Module interface function definitions ----------------------------------- */
@@ -38,7 +40,7 @@ ZTEST(ubi_unit, test_derivation_is_deterministic)
 	uint8_t first[UBI_MAC_SIZE] = { 0 };
 	uint8_t second[UBI_MAC_SIZE] = { 0 };
 
-	zassert_ok(ubi_impl_key_derive(ikm_key, &again_header,
+	zassert_ok(ubi_impl_key_derive(ikm_key, NULL, 0, &again_header,
 				       &again_volume_table));
 
 	key_fingerprint(key_header, first, sizeof(first));
@@ -80,7 +82,7 @@ ZTEST(ubi_unit, test_derivation_follows_the_key_material)
 	other_key =
 		import_ikm(other_ikm, sizeof(other_ikm), PSA_KEY_USAGE_DERIVE);
 
-	zassert_ok(ubi_impl_key_derive(other_key, &other_header,
+	zassert_ok(ubi_impl_key_derive(other_key, NULL, 0, &other_header,
 				       &other_volume_table));
 
 	key_fingerprint(key_header, original, sizeof(original));
@@ -101,8 +103,9 @@ ZTEST(ubi_unit, test_derivation_rejects_a_key_it_may_not_use)
 	psa_key_id_t derived_header = PSA_KEY_ID_NULL;
 	psa_key_id_t derived_volume_table = PSA_KEY_ID_NULL;
 
-	zassert_equal(-EACCES, ubi_impl_key_derive(wrong, &derived_header,
-						   &derived_volume_table));
+	zassert_equal(-EACCES,
+		      ubi_impl_key_derive(wrong, NULL, 0, &derived_header,
+					  &derived_volume_table));
 	zassert_equal(PSA_KEY_ID_NULL, derived_header);
 	zassert_equal(PSA_KEY_ID_NULL, derived_volume_table);
 
@@ -114,9 +117,25 @@ ZTEST(ubi_unit, test_derivation_rejects_an_absent_key)
 	psa_key_id_t derived_header = PSA_KEY_ID_NULL;
 	psa_key_id_t derived_volume_table = PSA_KEY_ID_NULL;
 
-	zassert_equal(-EINVAL,
-		      ubi_impl_key_derive(PSA_KEY_ID_NULL, &derived_header,
-					  &derived_volume_table));
-	zassert_equal(-EINVAL, ubi_impl_key_derive(ikm_key, NULL,
+	zassert_equal(-EINVAL, ubi_impl_key_derive(PSA_KEY_ID_NULL, NULL, 0,
+						   &derived_header,
 						   &derived_volume_table));
+	zassert_equal(-EINVAL, ubi_impl_key_derive(ikm_key, NULL, 0, NULL,
+						   &derived_volume_table));
+}
+
+ZTEST(ubi_unit, test_derivation_rejects_a_context_that_does_not_fit)
+{
+	uint8_t too_long[UBI_KEY_CONTEXT_MAX_SIZE + 1] = { 0 };
+	psa_key_id_t derived_header = PSA_KEY_ID_NULL;
+	psa_key_id_t derived_volume_table = PSA_KEY_ID_NULL;
+
+	zassert_equal(-EINVAL, ubi_impl_key_derive(
+				       ikm_key, too_long, sizeof(too_long),
+				       &derived_header, &derived_volume_table));
+	zassert_equal(-EINVAL,
+		      ubi_impl_key_derive(ikm_key, NULL, 1, &derived_header,
+					  &derived_volume_table));
+	zassert_equal(PSA_KEY_ID_NULL, derived_header);
+	zassert_equal(PSA_KEY_ID_NULL, derived_volume_table);
 }

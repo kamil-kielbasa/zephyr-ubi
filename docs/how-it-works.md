@@ -1,197 +1,204 @@
 # How it works
 
-A tour of the model, for someone about to read the code or debug a device.
-
 ## Logical and physical blocks
 
 A **physical erase block** (PEB) is one erase unit of the flash. A **logical
-erase block** (LEB) is what a volume addresses. The mapping between them is
-UBI's whole job.
+erase block** (LEB) is what a volume addresses. The application writes to
+volume 3, block 7; UBI picks the PEB and moves it when that serves the flash
+better. The mapping lives in RAM and is rebuilt from the headers at every
+attach.
 
-Nothing in the API names a PEB. An application writes to volume 3, block 7; UBI
-decides which piece of silicon that lands on, and moves it whenever that serves
-the flash better. The mapping is rebuilt from the flash on every attach and
-kept in RAM — it is never stored as a table.
+A LEB is smaller than a PEB by the two 64-byte headers in front of the data.
 
-A LEB is smaller than a PEB by the 128 bytes the two headers take.
+## Block states
 
-## What a block can be
-
-Every PEB is in one of seven states, all of them RAM-only:
+Every PEB is in one of nine states, held in RAM only:
 
 | state | meaning |
 |---|---|
-| `UNKNOWN` | no usable erase counter header; reclaim can make it free |
-| `FREE` | erased, stamped with an erase counter, waiting |
-| `MAPPED` | carries a logical block |
-| `RECLAIM` | its contents are dead; an erase will hand it back |
-| `CORRUPT` | damaged behind a valid erase counter header; preserved unread |
-| `BAD` | refused an operation once, and will get one more chance |
-| `WORN_OUT` | refused again; out of service until the next attach |
+| `UNKNOWN` | no usable erase counter header; reclaim makes it free |
+| `FREE` | erased and stamped with its erase count |
+| `MAPPED` | backs a logical block |
+| `ERRONEOUS` | backs a logical block relocation could not read; left in place |
+| `RECLAIM` | contents dead, waiting for an erase |
+| `UNMAPPED` | let go of by an unmap, erased after the dead ones |
+| `CORRUPT` | damaged behind a valid erase counter header, kept unread |
+| `BAD` | failed a write or an erase, gets one more chance |
+| `WORN_OUT` | failed again, out of service until the next attach |
 
-Retirement lives only in RAM on purpose. A block that failed a write may well
-be fine after a power cycle, and nothing is gained by writing that verdict down
-where it cannot be revised.
+```mermaid
+stateDiagram-v2
+    direction LR
+    UNKNOWN --> FREE: reclaim
+    RECLAIM --> FREE: reclaim
+    UNMAPPED --> FREE: reclaim
+    FREE --> MAPPED: write or map
+    MAPPED --> RECLAIM: change, resize or remove
+    MAPPED --> UNMAPPED: unmap
+    MAPPED --> FREE: erase, relocation or table update
+    MAPPED --> ERRONEOUS: relocation cannot read it
+    ERRONEOUS --> RECLAIM: its logical block lets go
+    FREE --> BAD: a write fails
+    BAD --> FREE: repair
+    BAD --> WORN_OUT: repair fails
+    CORRUPT --> FREE: discard
+```
 
-`CORRUPT` is the one state nothing reclaims. When a block's erase counter
-header verifies but the volume identifier header behind it does not, the data
-area decides: all erased bytes means a write cut short, which is ordinary and
-safe to erase; anything else is damage of unknown origin and the block is kept
-as it is. Erasing it would destroy the only copy of whatever it still holds,
-and the event that reported the damage would be all that is left of it. Linux
-UBI preserves the same blocks on the same reasoning, and like Linux this
-refuses the attach outright once more than a twentieth of the partition is in
-that state.
+A block that failed a write may work after a power cycle, so retirement is
+never written down. A failed erase is different: the block still holds what it
+held, and flash has no way to mark it bad. The device turns read-only until the
+next attach; reads carry on and every call that would write returns `-EROFS`.
+
+A block whose erase counter header verifies but whose volume identifier header
+does not is judged by its data area. All erased means a write cut short, safe
+to erase. Anything else is kept as `CORRUPT` until `UBI_MAINTENANCE_DISCARD`,
+so the only copy of what it holds is not destroyed. Attach refuses the
+partition once corrupt blocks reach a twentieth of its good blocks, rounded
+down, or eight when that is zero.
 
 ## Attach
 
-Attach reads the flash twice and decides everything else in memory.
+Attach reads the flash twice, decides in RAM and writes nothing.
 
-The **first pass** judges each block by its headers alone. It cannot yet know
-which image a block belongs to, because that lives in the volume table, which
-lives in a block this pass is still looking for. So it records erase counts,
-tracks the highest sequence number seen, and notes which blocks claim the
-reserved volume the table uses.
+The **first pass** reads the headers of every block. It records erase counts,
+the highest sequence number, and which blocks hold the volume table. A block
+without a usable erase counter header is `UNKNOWN` and gets the mean erase
+count of the others. A block that cannot be read stops the attach with `-EIO`:
+it may hold the newest copy of something.
 
-Between the passes the two copies of the volume table are read and one is
-adopted — the newer of the two, by sequence number. If they disagree, or only
-one is readable, the device works but reports `UBI_EVENT_VOLUME_TABLE_DEGRADED`
-and one erase would now cost a revision instead of being survivable.
+Then one of the two **volume table** copies is adopted: the newer by sequence
+number, if it is sealed, its data matches the seal, its record verifies and it
+belongs to its header's image. The older copy stands in for a newer one that
+was cut short or damaged, never for one that cannot be read or that a newer
+release wrote, which may be the table in force. A table resting on one copy is
+reported with `UBI_EVENT_VOLUME_TABLE_DEGRADED`; any stale copy is dropped.
 
-The **second pass** applies what the table settled. Blocks stamped for another
-image drop back to `UNKNOWN`; the rest are hung off the logical blocks their
-headers name. A block claiming a volume or block number the table does not
-describe is an orphan: authentic, but pointing at nothing. It is reported and
-queued for reclaim.
-
-Attach writes nothing. It costs roughly two reads per block plus one over the
-data each sealed block promised, and no erases at all.
+The **second pass** hangs every block off the logical block its header names.
+Blocks of another image become `UNKNOWN`. A block naming a volume or block the
+table does not describe is an orphan, queued for reclaim and reported, unless a
+removal or a shrink left it.
 
 ### Duplicates
 
-Two blocks can claim the same logical block after a power loss mid-update. The
-higher sequence number wins, except in one case: if the newer block is sealed —
-`copy_flag` set — and its data does not match the checksum its header carries,
-it loses regardless. That is what makes `ubi_leb_change()` atomic across a
-power cut. The older copy survives intact because the newer one never became
-credible.
+A power loss during an update can leave two blocks naming the same logical
+block. The higher sequence number wins, unless the newer block is sealed and
+its data fails the checksum in its header: then it loses and is reported with
+`UBI_EVENT_DATA_CORRUPT`. This is what makes `ubi_leb_change()` atomic. A
+sealed block that fails its checksum with no older copy behind it is kept and
+reported: dropping it would lose every byte that did reach the flash.
 
 ## Writing
 
-`ubi_leb_change()` replaces a logical block whole. It takes a free physical
-block, writes the header and the data, and only then switches the mapping. The
-old block becomes `RECLAIM`. If anything fails before the switch, nothing has
-changed.
+`ubi_leb_change()` writes the header and data into a free block and moves the
+mapping once they are down. The old block goes to `RECLAIM`. A block that
+fails the write is erased and retired, so nothing half written survives. A
+logical block with no contents yet has nothing to fall back to: a first change
+cut short leaves what reached the flash, reported at the next attach.
 
-`ubi_leb_write_at()` appends at an offset you choose, with no seal and no
-checksum, and maps the block on demand if it is not mapped yet. It is the cheap
-path and it trusts you completely: it will not stop overlapping writes, will
-not recover the append frontier after a reboot, and will not notice a torn
-record. The same bargain Linux's `ubi_leb_write()` makes.
+`ubi_leb_write_at()` appends at the offset given, with no seal. It maps the
+block on first use and trusts the caller: it does not stop overlapping writes,
+remember the append frontier or notice a torn record.
 
-`ubi_leb_unmap()` drops the mapping in RAM and queues the block. It does not
-erase anything and it is **not durable**: the block still carries its header,
-so the next attach maps it again. To lose data for good, erase the block with
-`ubi_leb_erase()` or overwrite it.
+`ubi_leb_unmap()` drops the mapping in RAM and writes nothing. Until reclaim
+erases the block, the next attach maps it back with the contents it had when
+unmapped, never older ones. Reclaim erases dead copies first, then an unmapped
+block together with every other copy of its logical block.
 
-## Pools
+`ubi_leb_erase()` erases every older copy of the block still waiting for
+reclaim, then the block itself. None of them comes back after a reboot, and an
+erase cut short can bring back only the newest contents.
 
-The free pool is what writes draw from, and maintenance is what fills it. A
-block is allocated by taking the most worn free block that is still within
-`CONFIG_UBI_WEAR_LEVELING_THRESHOLD` erases of the least worn one. Taking the
-extreme in either direction is what Linux UBI avoids and for the same reason:
-always picking the freshest block wears it out on its own, and always picking
-the most worn one does the same at the other end. Linux bounds the same search
-with `wl_free_max_diff`, which is twice its threshold; the halves and doubles
-here line up with it.
+## Volume table updates
 
-Two blocks are reserved beyond what volumes can claim — the two copies of the
-volume table — plus one spare so that a commit always has somewhere to go.
+The volume table is two copies of one record. An update writes each copy into
+a fresh block and moves its mapping, first the copy not in force, then the
+other, and erases the block each one leaves. The new record is in force once
+the first copy is down. No copy is ever overwritten, so an update cut short
+leaves the old record or the new one, and the table wears like any other data.
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant UBI
+    participant Flash
+    App->>UBI: ubi_volume_create()
+    UBI->>Flash: write the copy not in force into a fresh block
+    Note over UBI: switch to it, and the new record is in force
+    UBI->>Flash: erase the block that copy left
+    UBI->>Flash: write the other copy into a fresh block
+    Note over UBI: switch to it, and both copies agree
+    UBI->>Flash: erase the block that copy left
+    UBI-->>App: 0
+```
+
+## Erasing
+
+An erase cut short can leave both headers intact over data that is partly
+gone. Before each erase, UBI zeroes the magic of every header that still
+verifies, the erase counter header first, so such a block has no header left
+and is erased again before use. The erase count is kept in RAM and goes into
+the fresh header.
+
+Flash with ECC refuses the second write. UBI then logs it once and erases
+without it until the next attach; `CONFIG_UBI_ERASE_INVALIDATES_HEADERS=n`
+skips the attempt.
+
+## Allocation
+
+A write takes the most worn free block within
+`CONFIG_UBI_WEAR_LEVELING_THRESHOLD` erases of the least worn one, so neither
+the freshest nor the most worn block takes every write. Three blocks are held
+back from volumes: two for the volume table and one spare for its updates.
+When no block is free, the write erases one itself, so a device that never
+runs reclaim still works, one erase per write slower.
 
 ## Maintenance
 
-There is no background thread. Nothing moves unless the application calls
-`ubi_maintenance()`, which takes a budget in units of work and reports what it
-did and what is left.
+Nothing runs in the background. `ubi_maintenance()` takes an operation and a
+budget in units of work, and reports what it did and what is left.
 
-**`UBI_MAINTENANCE_RECLAIM`** erases blocks whose contents are dead and stamps
-them with a fresh erase counter. This is where the cost of an erase is paid.
-Keeping it topped up is what makes a write cost no erase at all.
+- **`UBI_MAINTENANCE_RECLAIM`** erases dead blocks and stamps them. A full
+  free pool makes writes erase-free.
+- **`UBI_MAINTENANCE_RELOCATE`** levels wear. It picks the block to move onto
+  first, and moves the least worn block in use when the gap to it exceeds the
+  threshold. The data is copied up to its last written byte, sealed afresh,
+  read back and compared before the mapping moves. A block that cannot be read
+  stays where it is as `ERRONEOUS`. A freshly handed out block is left alone
+  for `CONFIG_UBI_PROTECTION_CYCLES` erases, since its data is likely to be
+  rewritten soon.
+- **`UBI_MAINTENANCE_REPAIR`** brings the volume table copies back into
+  agreement and gives retired blocks another chance. A block that fails that
+  chance is written off, not reported as an error.
+- **`UBI_MAINTENANCE_DISCARD`** erases the `CORRUPT` blocks and returns them
+  to service.
 
-**`UBI_MAINTENANCE_RELOCATE`** is wear levelling. The block it would move onto
-is picked first; when the gap between that block and some block in use exceeds
-`CONFIG_UBI_WEAR_LEVELING_THRESHOLD`, the contents of the least worn such block
-are copied over and the block with more life left goes back into rotation.
-Judging the gap against the block actually available, rather than against the
-most worn block on the device, is what keeps levelling from moving data onto
-something no better than where it already was. Linux settles it the same way in
-`ensure_wear_leveling()`. The data's checksum is verified on the way, never
-recomputed — moving a block must not launder damage into a fresh seal.
+## Callbacks
 
-A block that was just handed out is left alone for
-`CONFIG_UBI_PROTECTION_CYCLES` erases, because moving data the caller has only
-just written — and may be about to replace — is wasted work. Without this
-guard, a pool of worn blocks suddenly flooded with barely used ones (say, after
-a cold volume is removed) will relocate *every* write straight back out,
-doubling the erase count.
+Both are required, so ignoring what UBI finds is a decision written in code.
 
-**`UBI_MAINTENANCE_REPAIR`** brings the two copies of the volume table back
-into agreement, and gives retired blocks a second chance. A block that fails
-that chance is written off rather than reported as an error: a part wearing out
-is something this device is expected to live through, not a failure of the
-repair. It stops being counted as work waiting, and stays in `bad_pebs`.
+The **event callback** reports damage as it is found: a header failing its CRC
+or its MAC, a lost volume table copy, an orphan, a retired block, a sealed
+block whose data fails its checksum.
 
-## Trust
+The **state callback** decides whether to trust the device, at the end of
+every attach and every `CONFIG_UBI_STATE_CHECK_INTERVAL` flash writes. It runs
+before the write it guards, so a refusal leaves nothing written. Rollback
+detection belongs here; see [Security](security.md).
 
-Two callbacks, both required. Ignoring what UBI finds has to be something the
-application writes down, not something it inherits from a zeroed field.
-
-The **event callback** reports damage and inconsistency as they are found:
-a header that failed its CRC, a header whose CRC passed but whose MAC did not,
-a lost copy of the volume table, an orphaned block, a retired block.
-
-The **state callback** is a trust check. It is consulted at the end of every
-attach and again every `CONFIG_UBI_STATE_CHECK_INTERVAL` metadata writes, so a
-long uptime is not a way around it. It is asked *before* the write it guards,
-which is what lets a refusal be honoured with nothing on the flash. This is
-where rollback detection belongs — see [security.md](security.md).
+Both run on the calling thread with the device locked. They must not block,
+and a call back into UBI returns `-EDEADLK`.
 
 ## Relation to Linux UBI
 
-The on-flash headers are Linux's, field for field, with a MAC placed in space
-Linux reserves as padding. An erase counter header written here passes
-validation in unmodified Linux UBI.
+The headers are Linux's, field for field, with the MAC in space Linux leaves as
+padding. The attach, duplicate resolution, erase ordering, wear levelling,
+protection of fresh blocks, preservation of corrupt blocks and the read-only
+state after a failed erase follow Linux UBI on NOR flash.
 
-What is kept:
+Not ported: static volumes, fastmap, the background thread and scrubbing as a
+separate operation. Added: authenticated metadata, the events that come with
+it, and the state callback.
 
-- two passes at attach, and the mapping rebuilt in RAM rather than stored
-- sequence numbers deciding duplicates, with the copy flag overriding them
-- `copy_flag` left clear on an append, so a later write cannot invalidate a
-  seal written before it
-- wear levelling driven by the gap between the least worn block in use and the
-  block it would actually be moved onto
-- both ends of the free pool bounded, so that neither the freshest nor the most
-  worn block absorbs everything
-- a freshly handed out block protected from being moved for a while
-- blocks damaged behind a valid erase counter header preserved rather than
-  erased, and an attach refused once too many of them pile up
-- erase counters bounded at 31 bits, as Linux bounds them
-- retirement held in RAM, never written to the flash
-
-What is deliberately not ported:
-
-- static volumes, and with them `used_ebs` and `data_pad`
-- fastmap
-- a background thread: maintenance here is explicit and budgeted
-- scrubbing as a separate operation
-
-What Linux does not have:
-
-- authenticated metadata, and the events that fall out of it
-- a trust callback, and with it a place for rollback detection
-
-Two constants deserve a note. Linux defaults its wear levelling threshold to
-4096 and protects a fresh block for 10 erases. This library uses 256 and 64.
-The threshold follows Linux's own advice for flash rated under ten thousand
-cycles; the protection window has to be larger to match, because a tighter
-threshold reaches for a block far more often.
+The defaults differ: a wear levelling threshold of 256 against Linux's 4096,
+suited to flash rated for fewer erase cycles, and a protection window of 64
+erases against 10, since a tighter threshold relocates more often.

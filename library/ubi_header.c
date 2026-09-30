@@ -32,19 +32,16 @@
 
 LOG_MODULE_REGISTER(ubi, CONFIG_UBI_LOG_LEVEL);
 
-/** "UBI#" - erase counter header, the value Linux UBI uses. */
+/** "UBI#" - erase counter header. */
 #define UBI_EC_HEADER_MAGIC (0x55424923UL)
 
-/** "UBI!" - volume identifier header, the value Linux UBI uses. */
+/** "UBI!" - volume identifier header. */
 #define UBI_VID_HEADER_MAGIC (0x55424921UL)
 
-/** Only dynamic volumes exist; static ones were dropped by design. */
+/** Only dynamic volumes exist. */
 #define UBI_VID_TYPE_DYNAMIC (1)
 
-/*
- * Field offsets. Every field Linux UBI interprets sits where Linux puts it;
- * the MAC occupies bytes Linux reserves as padding.
- */
+/* Field offsets; ubi_header.h describes the layout. */
 
 #define HEADER_OFFSET_MAGIC (0x00)
 #define HEADER_OFFSET_VERSION (0x04)
@@ -87,22 +84,18 @@ BUILD_ASSERT(VID_OFFSET_MAC + UBI_MAC_SIZE <= HEADER_OFFSET_CRC,
 BUILD_ASSERT(UBI_DATA_OFFSET == UBI_VID_HEADER_OFFSET + UBI_HEADER_SIZE,
 	     "the two headers must be adjacent so one read fetches both");
 
+BUILD_ASSERT(HEADER_OFFSET_MAGIC + UBI_HEADER_MAGIC_SIZE ==
+		     HEADER_OFFSET_VERSION,
+	     "the magic is what an invalidation clears, and nothing more");
+
 /* Static function declarations -------------------------------------------- */
 
 /**
- * \brief Lay out the exact byte sequence that the MAC is computed over.
+ * \brief Lay out the bytes the MAC covers: the block number, big-endian,
+ *        then the header without its MAC and CRC. The block number binds
+ *        the header to its position.
  *
- *        That sequence is the physical block number in big-endian, followed
- *        by the header with two windows removed: the MAC itself, which cannot
- *        authenticate itself, and the trailing CRC, which is computed
- *        afterwards and so is not known yet.
- *
- *        Prefixing the block number is what binds a header to its position.
- *        The same bytes read from a different block produce a different input
- *        here, so the stored MAC no longer matches.
- *
- * \param[in] buffer                    Header bytes; the MAC field is
- *                                      skipped, so its content is ignored.
+ * \param[in] buffer                    Header bytes.
  * \param buffer_size                   Bytes available at \p buffer.
  * \param pnum                          Physical block number to bind in.
  * \param mac_offset                    Where the MAC sits in \p buffer.
@@ -249,17 +242,20 @@ static enum ubi_header_status header_verify(const uint8_t *buffer,
 	uint8_t message[HEADER_MAC_INPUT_SIZE] = { 0 };
 	psa_status_t status = PSA_ERROR_GENERIC_ERROR;
 	int ret = 0;
+	const bool erased = header_is_erased(buffer, erase_value);
 
-	if (header_is_erased(buffer, erase_value)) {
+	if (erased)
 		return UBI_HEADER_ERASED;
-	}
 
-	if (magic != sys_get_be32(&buffer[HEADER_OFFSET_MAGIC])) {
+	const uint32_t found = sys_get_be32(&buffer[HEADER_OFFSET_MAGIC]);
+
+	if (magic != found)
 		return UBI_HEADER_NOT_UBI;
-	}
 
-	if (sys_get_be32(&buffer[HEADER_OFFSET_CRC]) !=
-	    crc32_ieee(buffer, HEADER_OFFSET_CRC)) {
+	const uint32_t stored_crc = sys_get_be32(&buffer[HEADER_OFFSET_CRC]);
+	const uint32_t crc = crc32_ieee(buffer, HEADER_OFFSET_CRC);
+
+	if (stored_crc != crc) {
 		LOG_ERR("PEB %u: %s header CRC mismatch, so it is unusable",
 			pnum, header_name(magic));
 		return UBI_HEADER_CORRUPT;
@@ -268,9 +264,8 @@ static enum ubi_header_status header_verify(const uint8_t *buffer,
 	ret = header_build_mac_input(buffer, buffer_size, pnum, mac_offset,
 				     message, sizeof(message));
 
-	if (0 != ret) {
+	if (0 != ret)
 		return UBI_HEADER_ERROR;
-	}
 
 	/* Constant-time comparison; never memcmp() a MAC. */
 	status = psa_mac_verify(key_id, PSA_ALG_CMAC, message, sizeof(message),
@@ -291,7 +286,7 @@ static enum ubi_header_status header_verify(const uint8_t *buffer,
 
 	/* Only now is the version byte trustworthy. */
 	if (UBI_HEADER_VERSION != buffer[HEADER_OFFSET_VERSION])
-		return UBI_HEADER_NOT_UBI;
+		return UBI_HEADER_UNSUPPORTED;
 
 	return UBI_HEADER_OK;
 }
@@ -311,9 +306,8 @@ static void header_begin(uint8_t *buffer, uint32_t magic)
 static bool header_is_erased(const uint8_t *buffer, uint8_t erase_value)
 {
 	for (size_t i = 0; i < UBI_HEADER_SIZE; ++i) {
-		if (erase_value != buffer[i]) {
+		if (erase_value != buffer[i])
 			return false;
-		}
 	}
 
 	return true;
@@ -340,9 +334,10 @@ int ubi_impl_header_ec_serialize(const struct ubi_ec_header *header,
 				 psa_key_id_t key_id, uint32_t pnum,
 				 uint8_t *buffer, size_t buffer_size)
 {
-	if (NULL == header ||
-	    !header_arguments_are_usable(buffer, buffer_size, key_id, pnum,
-					 UBI_EC_HEADER_MAGIC))
+	const bool usable = header_arguments_are_usable(
+		buffer, buffer_size, key_id, pnum, UBI_EC_HEADER_MAGIC);
+
+	if (NULL == header || !usable)
 		return -EINVAL;
 
 	header_begin(buffer, UBI_EC_HEADER_MAGIC);
@@ -361,8 +356,10 @@ ubi_impl_header_ec_parse(const uint8_t *buffer, size_t buffer_size,
 			 psa_key_id_t key_id, uint32_t pnum,
 			 uint8_t erase_value, struct ubi_ec_header *header)
 {
-	if (!header_arguments_are_usable(buffer, buffer_size, key_id, pnum,
-					 UBI_EC_HEADER_MAGIC))
+	const bool usable = header_arguments_are_usable(
+		buffer, buffer_size, key_id, pnum, UBI_EC_HEADER_MAGIC);
+
+	if (!usable)
 		return UBI_HEADER_ERROR;
 
 	const enum ubi_header_status status =
@@ -386,7 +383,7 @@ ubi_impl_header_ec_parse(const uint8_t *buffer, size_t buffer_size,
 		LOG_WRN("PEB %u: authentic EC header describes an unsupported "
 			"layout (vid=%u, data=%u)",
 			pnum, vid_header_offset, data_offset);
-		return UBI_HEADER_NOT_UBI;
+		return UBI_HEADER_UNSUPPORTED;
 	}
 
 	if (NULL == header)
@@ -404,9 +401,10 @@ int ubi_impl_header_vid_serialize(const struct ubi_vid_header *header,
 				  psa_key_id_t key_id, uint32_t pnum,
 				  uint8_t *buffer, size_t buffer_size)
 {
-	if (NULL == header ||
-	    !header_arguments_are_usable(buffer, buffer_size, key_id, pnum,
-					 UBI_VID_HEADER_MAGIC))
+	const bool usable = header_arguments_are_usable(
+		buffer, buffer_size, key_id, pnum, UBI_VID_HEADER_MAGIC);
+
+	if (NULL == header || !usable)
 		return -EINVAL;
 
 	header_begin(buffer, UBI_VID_HEADER_MAGIC);
@@ -429,8 +427,10 @@ ubi_impl_header_vid_parse(const uint8_t *buffer, size_t buffer_size,
 			  psa_key_id_t key_id, uint32_t pnum,
 			  uint8_t erase_value, struct ubi_vid_header *header)
 {
-	if (!header_arguments_are_usable(buffer, buffer_size, key_id, pnum,
-					 UBI_VID_HEADER_MAGIC))
+	const bool usable = header_arguments_are_usable(
+		buffer, buffer_size, key_id, pnum, UBI_VID_HEADER_MAGIC);
+
+	if (!usable)
 		return UBI_HEADER_ERROR;
 
 	const enum ubi_header_status status = header_verify(
@@ -522,7 +522,7 @@ int ubi_impl_header_vid_data_verify(const struct ubi_device *ubi, uint32_t pnum,
 		return -EBADMSG;
 	}
 
-	uint8_t chunk[DATA_VERIFY_CHUNK] = { 0 };
+	uint8_t chunk[CONFIG_UBI_IO_CHUNK_SIZE] = { 0 };
 	uint32_t crc = 0;
 
 	for (uint32_t at = 0; at < header->data_size; at += sizeof(chunk)) {
