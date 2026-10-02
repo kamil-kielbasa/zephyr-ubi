@@ -1,9 +1,11 @@
 # UBI for Zephyr
 
-[![build and test](https://github.com/kamil-kielbasa/zephyr-ubi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kamil-kielbasa/zephyr-ubi/actions/workflows/ci.yml)
-[![docs](https://github.com/kamil-kielbasa/zephyr-ubi/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/kamil-kielbasa/zephyr-ubi/actions/workflows/docs.yml)
+[![CI / Zephyr](https://github.com/kamil-kielbasa/zephyr-ubi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kamil-kielbasa/zephyr-ubi/actions/workflows/ci.yml)
+[![CI / Documentation](https://github.com/kamil-kielbasa/zephyr-ubi/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/kamil-kielbasa/zephyr-ubi/actions/workflows/docs.yml)
+[![codecov](https://codecov.io/gh/kamil-kielbasa/zephyr-ubi/branch/main/graph/badge.svg)](https://codecov.io/gh/kamil-kielbasa/zephyr-ubi)
 
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://kamil-kielbasa.github.io/zephyr-ubi/)
+[![Release](https://img.shields.io/github/v/release/kamil-kielbasa/zephyr-ubi)](https://github.com/kamil-kielbasa/zephyr-ubi/releases)
 [![Zephyr](https://img.shields.io/badge/Zephyr-4.4-blueviolet)](https://zephyrproject.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -14,58 +16,41 @@ own metadata authenticated with AES-CMAC.
 
 ## Features
 
-- **Volumes** — named volumes of logical blocks, created, resized and removed
-  at run time.
-- **Power-loss safe** — a block replaced whole holds the old contents or the
-  new ones after a power cut; appends cost no erase.
-- **Wear levelling on demand** — erasing and relocation run when the
-  application asks, on a budget it chooses; no background thread.
-- **Authenticated metadata** — headers and the volume table carry an AES-CMAC
-  under keys derived from a PSA key handle; damage and tampering are reported
-  apart.
-- **Rollback checks** — a state callback where the application compares the
-  device with a store of its own, at attach and during use.
-- **Linux-compatible headers** — laid out as in Linux UBI, with the MAC in
-  space Linux leaves as padding.
-- **Predictable footprint** — a fixed-size handle, a scratch buffer and 8
-  bytes per erase block of heap, under 2 KiB of stack for any call.
+| | UBI for Zephyr | Linux UBI |
+|---|:---:|:---:|
+| Named volumes, created, resized and removed at run time | ✓ | ✓ |
+| Volume rename | ✗ | ✓ |
+| Static volumes | ✗ | ✓ |
+| Atomic block replace, `ubi_leb_change()` | ✓ | ✓ |
+| Appends with no erase, `ubi_leb_write_at()` | ✓ | ✓ |
+| Wear levelling and erasing of released blocks | on demand | background thread |
+| Scrubbing after bit flips | ✗ | ✓ |
+| Fastmap | ✗ | ✓ |
+| Headers and volume table authenticated with AES-CMAC | ✓ | ✗ |
+| Damage and tampering reported apart | ✓ | ✗ |
+| Rollback check through a state callback | ✓ | ✗ |
+| Block header re-authenticated on every read | option | ✗ |
 
-Application data is stored as given: neither encrypted nor authenticated.
+On demand means `ubi_maintenance()`, on a budget the application chooses; a
+write that finds no free block erases one itself. Headers are laid out as in
+Linux UBI, with the MAC in space Linux leaves as padding. Application data is
+stored as given: neither encrypted nor authenticated.
 
 ## Requirements
 
-- Zephyr 4.4.
-- PSA Crypto with AES-CMAC, HKDF and SHA-256: mbedTLS, TF-M or the platform's
-  own.
-- A fixed partition on flash with:
-  - whole erase blocks of one size, 4 to 65534 of them, each larger than the
-    two 64-byte headers and the volume table (320 bytes with 4 volumes);
-  - a write block that divides 64 bytes;
-  - every write block programmable once after an erase, in any order.
+| Component | Requirement |
+|---|---|
+| Zephyr | 4.4 |
+| Cryptography | PSA Crypto with AES-CMAC, HKDF and SHA-256 (mbedTLS, TF-M or the platform's own) |
+| Partition | one fixed partition of 4 to 65534 erase blocks of one size |
+| Erase block | larger than the two 64-byte headers and the volume table (320 bytes with 4 volumes) |
+| Write block | divides 64 bytes |
+| Programming | every write block once after an erase, in any order |
+| RAM | a fixed-size handle; on the heap, a scratch buffer and 8 bytes per erase block |
+| Stack | under 2 KiB for any call |
 
-NOR flash, external or on-chip, meets these. On flash with ECC, turn off
-`CONFIG_UBI_ERASE_INVALIDATES_HEADERS`: it writes over programmed bytes.
-
-NAND is not supported. Its pages are larger than the 64-byte headers, must be
-written in order, and need bad-block marking and ECC, none of which the Zephyr
-flash API provides.
-
-## Quick start
-
-Add the module to the west manifest:
-
-```yaml
-    - name: zephyr-ubi
-      url: https://github.com/kamil-kielbasa/zephyr-ubi
-      revision: main
-      path: modules/lib/zephyr-ubi
-```
-
-Build and run the sample, which formats a blank partition and counts boots:
-
-```sh
-west build -b native_sim modules/lib/zephyr-ubi/samples/basic -t run
-```
+Exact figures: [Resources](https://kamil-kielbasa.github.io/zephyr-ubi/operations#resources)
+and [Limits](https://kamil-kielbasa.github.io/zephyr-ubi/operations#limits).
 
 ## Documentation
 

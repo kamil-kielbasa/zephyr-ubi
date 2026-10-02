@@ -1,6 +1,28 @@
 # Changelog
 
-## v0.1
+## v0.1.1 (2026-10-02)
+
+No change to the library or to the on-flash format.
+
+### Documentation
+
+- The README compares UBI for Zephyr with Linux UBI and lists the
+  requirements in tables; adding the module is described in the examples.
+- The documentation site shows the version it documents and the commit it was
+  built from.
+
+### CI
+
+- A smoke run (project rules, unit tests, integration tests and the sample)
+  has to pass before anything else starts.
+- The other configurations run in shards side by side. Every job and every long
+  step has a time limit, and the Zephyr setup gets a second attempt; a run that
+  failed only there is re-run once on fresh runners.
+- CI runs on pushes to `main`, on pull requests and on demand.
+- Library coverage is merged across the shards and sent to Codecov; the README
+  shows it next to the CI and release badges.
+
+## v0.1.0 (2026-09-30)
 
 First release.
 
