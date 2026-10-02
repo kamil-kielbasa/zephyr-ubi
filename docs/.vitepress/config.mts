@@ -1,9 +1,27 @@
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vitepress'
 
 const slug = process.env.GITHUB_REPOSITORY || 'kamil-kielbasa/zephyr-ubi'
 const name = slug.split('/')[1]
 const repoUrl = `https://github.com/${slug}`
 const apiUrl = `${repoUrl}/blob/main/include/ubi/ubi.h`
+
+const { version } = JSON.parse(
+  readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
+)
+
+// GitHub Actions names the commit; a local build has none.
+const commit = process.env.GITHUB_SHA
+const versionItems = [
+  { text: 'Changelog', link: `${repoUrl}/blob/main/CHANGELOG.md` },
+  { text: 'Releases', link: `${repoUrl}/releases` }
+]
+
+if (commit)
+  versionItems.push({
+    text: `Built from ${commit.slice(0, 7)}`,
+    link: `${repoUrl}/commit/${commit}`
+  })
 
 export default defineConfig({
   title: 'UBI for Zephyr',
@@ -36,7 +54,8 @@ export default defineConfig({
     nav: [
       { text: 'Guide', link: '/how-it-works' },
       { text: 'Examples', link: '/examples' },
-      { text: 'API', link: apiUrl }
+      { text: 'API', link: apiUrl },
+      { text: `v${version}`, items: versionItems }
     ],
 
     sidebar: [

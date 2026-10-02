@@ -1,6 +1,6 @@
 {
   "name": "zephyr-ubi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A volume manager for raw flash, built as a Zephyr module",
   "license": "MIT",
   "scripts": {

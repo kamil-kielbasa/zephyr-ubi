@@ -1,0 +1,35 @@
+name: CI / Re-run
+
+on:
+  workflow_run:
+    workflows: [CI / Zephyr]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  rerun:
+    name: Re-run jobs whose Zephyr setup failed
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # A setup that fails twice points at the runner; failed tests are never re-run.
+      - name: Re-run the failed jobs if only the Zephyr setup failed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          verdict=$(gh run view "$RUN_ID" --json jobs --jq '
+            [.jobs[] | select(.conclusion == "failure")]
+            | if length > 0 and all(.[]; all(.steps[] | select(.conclusion == "failure");
+                .name | startswith("Set up the Zephyr workspace")))
+              then "rerun" else "keep" end')
+          echo "Run $RUN_ID: $verdict"
+          if [ "$verdict" = rerun ]; then
+            gh run rerun "$RUN_ID" --failed
+          fi

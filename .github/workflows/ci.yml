@@ -1,39 +1,29 @@
-name: build and test
+name: CI / Zephyr
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Each tier starts only once the one before it passed:
+#   Smoke  ->  Tests (native_sim shards, nRF5340 DK, stack, fuzz)  ->  Coverage report
+
 jobs:
-  native_sim:
-    name: native_sim (${{ matrix.name }})
+  smoke:
+    name: Smoke
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: gcc
-            args: ''
-          - name: clang
-            args: ''
-            toolchain: host/llvm
-          - name: sanitizers
-            args: --enable-asan --enable-ubsan
-          # Twister's own report covers the module; the step below narrows
-          # it to the library. Naming gcov keeps twister from looking up a
-          # toolchain variant nobody set.
-          - name: coverage
-            args: >-
-              --coverage --coverage-tool gcovr --gcov-tool gcov
-              --coverage-basedir . --coverage-formats txt
+    timeout-minutes: 30
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Has to match "self: path:" in west.yml, or west will not find
           # this repository in the workspace it is about to create.
@@ -42,51 +32,257 @@ jobs:
       # Skipped tests, files of 800 lines, results cast to (void) and
       # functions defined out of their declared order.
       - name: Check the project rules
-        if: matrix.name == 'gcc'
         working-directory: zephyr-ubi
         run: python3 scripts/check_rules.py
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
+      # Downloads can hang; a step that times out fails, and the second
+      # attempt starts from a clean workspace.
       - name: Set up the Zephyr workspace
+        id: setup
+        continue-on-error: true
+        timeout-minutes: 10
         uses: zephyrproject-rtos/action-zephyr-setup@v1
         with:
           app-path: zephyr-ubi
           toolchains: x86_64-zephyr-elf
+          ccache-cache-key: smoke
 
-      - name: Install what native_sim needs to link 32-bit
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y gcc-multilib \
-            g++-multilib
+      - name: Clear the failed setup
+        if: steps.setup.outcome == 'failure'
+        run: rm -rf .west zephyr modules zephyr-sdk zephyr-sdk-*
+
+      - name: Set up the Zephyr workspace, second attempt
+        if: steps.setup.outcome == 'failure'
+        timeout-minutes: 10
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: zephyr-ubi
+          toolchains: x86_64-zephyr-elf
+          ccache-cache-key: smoke
+
+      - name: Build and run the unit tests, the integration tests and the sample
+        working-directory: zephyr-ubi
+        timeout-minutes: 10
+        run: >-
+          west twister -T tests -T samples -p native_sim
+          -s ubi.unit -s ubi.integration -s sample.ubi.basic --inline-logs
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: twister-smoke
+          path: zephyr-ubi/twister-out/twister.xml
+          if-no-files-found: ignore
+
+  tests:
+    name: ${{ matrix.name }}
+    needs: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: native_sim gcc (1/2)
+            id: gcc-1
+            toolchains: x86_64-zephyr-elf
+            twister: -T tests -T samples -p native_sim --enable-slow --subset 1/2
+          - name: native_sim gcc (2/2)
+            id: gcc-2
+            toolchains: x86_64-zephyr-elf
+            twister: -T tests -T samples -p native_sim --enable-slow --subset 2/2
+          - name: native_sim clang (1/2)
+            id: clang-1
+            toolchains: x86_64-zephyr-elf
+            clang: true
+            twister: -T tests -T samples -p native_sim --enable-slow --subset 1/2
+          - name: native_sim clang (2/2)
+            id: clang-2
+            toolchains: x86_64-zephyr-elf
+            clang: true
+            twister: -T tests -T samples -p native_sim --enable-slow --subset 2/2
+          - name: native_sim sanitizers (1/3)
+            id: sanitizers-1
+            toolchains: x86_64-zephyr-elf
+            twister: >-
+              -T tests -T samples -p native_sim --enable-slow --subset 1/3
+              --enable-asan --enable-ubsan
+          - name: native_sim sanitizers (2/3)
+            id: sanitizers-2
+            toolchains: x86_64-zephyr-elf
+            twister: >-
+              -T tests -T samples -p native_sim --enable-slow --subset 2/3
+              --enable-asan --enable-ubsan
+          - name: native_sim sanitizers (3/3)
+            id: sanitizers-3
+            toolchains: x86_64-zephyr-elf
+            twister: >-
+              -T tests -T samples -p native_sim --enable-slow --subset 3/3
+              --enable-asan --enable-ubsan
+          # Twister's own report covers the module; the export step narrows
+          # it to the library. Naming gcov keeps twister from looking up a
+          # toolchain variant nobody set.
+          - name: Coverage (1/3)
+            id: coverage-1
+            toolchains: x86_64-zephyr-elf
+            coverage: true
+            twister: >-
+              -T tests -T samples -p native_sim --enable-slow --subset 1/3
+              --coverage --coverage-tool gcovr --gcov-tool gcov
+              --coverage-basedir . --coverage-formats txt
+          - name: Coverage (2/3)
+            id: coverage-2
+            toolchains: x86_64-zephyr-elf
+            coverage: true
+            twister: >-
+              -T tests -T samples -p native_sim --enable-slow --subset 2/3
+              --coverage --coverage-tool gcovr --gcov-tool gcov
+              --coverage-basedir . --coverage-formats txt
+          - name: Coverage (3/3)
+            id: coverage-3
+            toolchains: x86_64-zephyr-elf
+            coverage: true
+            twister: >-
+              -T tests -T samples -p native_sim --enable-slow --subset 3/3
+              --coverage --coverage-tool gcovr --gcov-tool gcov
+              --coverage-basedir . --coverage-formats txt
+          # The hardware scenarios are slow to run, not to build.
+          - name: nRF5340 DK build (1/2)
+            id: nrf-1
+            toolchains: arm-zephyr-eabi
+            twister: >-
+              -T tests -T samples -p nrf5340dk/nrf5340/cpuapp --enable-slow
+              --build-only --subset 1/2
+          - name: nRF5340 DK build (2/2)
+            id: nrf-2
+            toolchains: arm-zephyr-eabi
+            twister: >-
+              -T tests -T samples -p nrf5340dk/nrf5340/cpuapp --enable-slow
+              --build-only --subset 2/2
+          # QEMU comes with the SDK's host tools.
+          - name: Stack (Cortex-M33 under QEMU)
+            id: stack
+            toolchains: arm-zephyr-eabi
+            twister: -T tests/stack -p mps2/an521/cpu0
+          # libFuzzer's runtime comes in a package of its own.
+          - name: Fuzz (libFuzzer)
+            id: fuzz
+            toolchains: x86_64-zephyr-elf
+            clang: true
+            packages: libclang-rt-18-dev
+            twister: -T tests/fuzz -p native_sim/native/64
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          path: zephyr-ubi
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Set up the Zephyr workspace
+        id: setup
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: zephyr-ubi
+          toolchains: ${{ matrix.toolchains }}
+          ccache-cache-key: ${{ matrix.id }}
+
+      - name: Clear the failed setup
+        if: steps.setup.outcome == 'failure'
+        run: rm -rf .west zephyr modules zephyr-sdk zephyr-sdk-*
+
+      - name: Set up the Zephyr workspace, second attempt
+        if: steps.setup.outcome == 'failure'
+        timeout-minutes: 10
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: zephyr-ubi
+          toolchains: ${{ matrix.toolchains }}
+          ccache-cache-key: ${{ matrix.id }}
 
       - name: Switch to clang
-        if: matrix.toolchain
+        if: matrix.clang
+        timeout-minutes: 5
         run: |
-          sudo apt-get install --no-install-recommends -y clang lld llvm
-          echo "ZEPHYR_TOOLCHAIN_VARIANT=${{ matrix.toolchain }}" >> "$GITHUB_ENV"
+          sudo apt-get install --no-install-recommends -y clang lld llvm \
+            ${{ matrix.packages }}
+          echo "ZEPHYR_TOOLCHAIN_VARIANT=host/llvm" >> "$GITHUB_ENV"
 
       - name: Install gcovr
-        if: matrix.name == 'coverage'
+        if: matrix.coverage
+        timeout-minutes: 5
         run: pip install gcovr
 
-      - name: Build and run every configuration
+      - name: Build and run
         working-directory: zephyr-ubi
-        run: >-
-          west twister -T tests -T samples -p native_sim --enable-slow
-          --inline-logs ${{ matrix.args }}
+        timeout-minutes: 20
+        run: west twister ${{ matrix.twister }} --inline-logs
 
-      - name: Report what the tests reach of the library
-        if: matrix.name == 'coverage'
+      - name: Export what the tests reach of the library
+        if: matrix.coverage
         working-directory: zephyr-ubi
         run: |
           mkdir -p coverage
           gcovr -r . --gcov-executable gcov --filter 'library/' \
+            --json coverage/library-${{ matrix.id }}.json twister-out
+
+      - name: Keep the coverage data
+        if: matrix.coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: tracefile-${{ matrix.id }}
+          path: zephyr-ubi/coverage/library-${{ matrix.id }}.json
+          if-no-files-found: error
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: twister-${{ matrix.id }}
+          path: zephyr-ubi/twister-out/twister.xml
+          if-no-files-found: ignore
+
+  coverage:
+    name: Coverage report
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install gcovr
+        timeout-minutes: 5
+        run: pip install gcovr
+
+      - name: Fetch the coverage data
+        uses: actions/download-artifact@v8
+        with:
+          pattern: tracefile-*
+          merge-multiple: true
+          path: coverage
+
+      - name: Report what the tests reach of the library
+        run: |
+          gcovr -r . --add-tracefile 'coverage/library-*.json' \
             --txt coverage/library.txt --html-details coverage/index.html \
-            twister-out
+            --cobertura coverage/coverage.xml
           cat coverage/library.txt
           {
             echo '```'
@@ -94,98 +290,16 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Keep the reports
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Send the library coverage to Codecov
+        uses: codecov/codecov-action@v7
         with:
-          name: twister-${{ matrix.name }}
-          path: |
-            zephyr-ubi/twister-out/twister.xml
-            zephyr-ubi/coverage/
-          if-no-files-found: ignore
+          files: coverage/coverage.xml
+          disable_search: true
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
-  nrf5340dk:
-    name: nRF5340 DK (build only)
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out
-        uses: actions/checkout@v4
+      - name: Keep the report
+        uses: actions/upload-artifact@v7
         with:
-          path: zephyr-ubi
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Set up the Zephyr workspace
-        uses: zephyrproject-rtos/action-zephyr-setup@v1
-        with:
-          app-path: zephyr-ubi
-          toolchains: arm-zephyr-eabi
-
-      # The hardware scenarios are slow to run, not to build.
-      - name: Build every configuration
-        working-directory: zephyr-ubi
-        run: >-
-          west twister -T tests -T samples -p nrf5340dk/nrf5340/cpuapp
-          --enable-slow --build-only --inline-logs
-
-  stack:
-    name: Stack (Cortex-M33 under QEMU)
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out
-        uses: actions/checkout@v4
-        with:
-          path: zephyr-ubi
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      # QEMU comes with the SDK's host tools.
-      - name: Set up the Zephyr workspace
-        uses: zephyrproject-rtos/action-zephyr-setup@v1
-        with:
-          app-path: zephyr-ubi
-          toolchains: arm-zephyr-eabi
-
-      - name: Measure the stack every call uses
-        working-directory: zephyr-ubi
-        run: >-
-          west twister -T tests/stack -p mps2/an521/cpu0 --inline-logs
-
-  fuzz:
-    name: Fuzz (libFuzzer)
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out
-        uses: actions/checkout@v4
-        with:
-          path: zephyr-ubi
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Set up the Zephyr workspace
-        uses: zephyrproject-rtos/action-zephyr-setup@v1
-        with:
-          app-path: zephyr-ubi
-          toolchains: x86_64-zephyr-elf
-
-      # libFuzzer's runtime comes in a package of its own.
-      - name: Switch to clang
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y clang lld llvm \
-            libclang-rt-18-dev
-          echo "ZEPHYR_TOOLCHAIN_VARIANT=host/llvm" >> "$GITHUB_ENV"
-
-      - name: Fuzz everything read off the flash
-        working-directory: zephyr-ubi
-        run: >-
-          west twister -T tests/fuzz -p native_sim/native/64 --inline-logs
+          name: coverage
+          path: coverage/
