@@ -1,138 +1,187 @@
 # Security
 
-## Assumptions
+UBI authenticates its own metadata, the block headers and the volume table,
+with a key that never leaves the PSA key store. Changes made to the metadata
+outside UBI are detected, and the application gets counters it can trust to
+detect a rollback of the flash. The data in the volumes is stored as written,
+neither encrypted nor authenticated.
 
-The attacker can **read and write the raw flash**, through a desoldered chip,
-an SPI clip, a debug port or a malicious update to another partition, and can
-boot the device and watch it run.
+## How the protection works
 
-The attacker does **not** have the input keying material. It stays in the PSA
-key store (TF-M, a secure element, whatever the platform provides); UBI is
-handed a key handle and derives its own keys from it.
+1. The application gives UBI the identifier of a key in the PSA key store.
+   UBI uses the key only through PSA and never reads it.
+2. From that key, UBI derives two keys of its own with HKDF-SHA256: one for
+   the block headers and one for the volume table. They exist only while the
+   device is attached.
+3. Every erase counter header and every volume identifier header carries a
+   message authentication code (MAC). It covers the fields of the header and
+   the number of the block the header is written in. The volume table carries
+   a MAC of its own.
+4. Whenever UBI reads a header, it checks the CRC first and the MAC second. A
+   failed CRC means accidental damage, such as a write cut short. A valid CRC
+   with a failed MAC means the header was changed on purpose, or written under
+   another key.
 
-Out of scope: side channels, fault injection, code running inside the secure
-domain, and availability. Whoever can write the flash can always erase it.
+The MAC is AES-CMAC: it is small and fast, and most microcontrollers have AES
+in hardware. Headers are verified at attach. With `CONFIG_UBI_VERIFY_ON_READ`,
+`ubi_leb_read()` also verifies the volume identifier header before reading,
+which catches changes made while the device runs. The byte layout is in
+[On-flash format](on-flash-format.md#mac-and-crc).
 
-## What is caught, and by whom
+## Threat model
 
-| # | attack | caught by | how |
-|---|---|---|---|
-| 1 | a byte changed in either header | UBI | the header MAC |
-| 2 | a byte changed in your data | you | your own AEAD |
-| 3 | a whole block copied elsewhere | UBI | `pnum` inside the MAC's message |
-| 4 | data moved between logical blocks | you | `vol_id` and `lnum` in your AAD |
-| 5 | a block from another image inserted, a volume table copy included | UBI | `image_seq`, authenticated |
-| 6 | the whole flash image rolled back | your application | the state callback sees `image_seq` change or `revision` go down |
-| 7 | the volume table replaced | UBI | the record MAC |
-| 8 | a block erased | you | the logical block reads back empty |
-| 9 | **one block restored to an older authentic version, same `pnum`** | **nobody** | see below |
+The protection is designed against an attacker who:
 
-## The boundary
+- can read and write the flash that holds the partition, for example after
+  desoldering the chip, by clipping onto its bus, or through an update meant
+  for another partition of the same flash;
+- can power the device on and off at any moment, and observe it while it
+  runs.
 
-Row 9 is where this stops. Every MAC verifies, `pnum` and `image_seq` match,
-and `revision` does not move, because the volume table did not change. Closing
-it would take a write to a trusted store for every UBI write. UBIFS
-authentication in Linux draws the line in the same place.
+The attacker cannot read or use the key. The key stays in the PSA key store,
+for example in TF-M or a secure element, and only the device's own firmware
+can use it: the attacker cannot run code of its own on the device.
 
-An old but authentic copy left on the flash is material for this attack, so
-run `UBI_MAINTENANCE_RECLAIM`: it erases them.
+Out of scope are side-channel and fault-injection attacks, code running in
+the secure domain, and denial of service: whoever can write the flash can
+always erase it.
+
+## What is detected
+
+| Change made to the flash | Detected by | How |
+|---|---|---|
+| A header modified | UBI | The MAC of the header fails: `UBI_EVENT_HDR_TAMPERED`. |
+| A volume table copy modified | UBI | The copy fails verification and the other copy is used: `UBI_EVENT_VOLUME_TABLE_CORRUPT`. |
+| A genuine block copied to another position | UBI | The MAC covers the block number, so the copy fails it. |
+| A block taken from another device or from an earlier format | UBI | The MAC depends on the device's key and covers `image_seq`; such a block is never used. |
+| Data in a volume modified | Application | Its own authenticated encryption; see [Protecting your data](#protecting-your-data). |
+| Data moved to another LEB | Application | The volume and the LEB number in its authenticated data. |
+| A block erased | Application | The LEB reads back as erased. |
+| The whole flash restored from an earlier copy | Application | The state callback; see [Rollback detection](#rollback-detection). |
+
+Blocks that fail verification are never used. A damaged block that still
+holds data is kept, unused, until `UBI_MAINTENANCE_DISCARD`; see
+[Damaged headers](how-it-works.md#damaged-headers). What to do on each event
+is in [Operations](operations.md#events).
+
+## Limits
+
+UBI cannot tell an older genuine version of a block from the current one. An
+attacker who saved a block earlier can write it back to the same place: its
+MAC verifies, its block number and image match, and the volume table has not
+changed. The same applies when the attacker erases the current copy of a
+block and an older copy, not yet erased by UBI, takes its place. Detecting
+this would require a record of every write in trusted storage.
+
+Two practices narrow this gap:
+
+- Run `UBI_MAINTENANCE_RECLAIM` regularly, so that old copies do not linger
+  on the flash.
+- Where old data must never be accepted again, keep its version number in
+  trusted storage and check it as part of the data's authentication.
+
+A restore of the whole flash is a different case: the counters in the next
+section can reveal it.
 
 ## Rollback detection
 
-The state callback receives `struct ubi_device_info`. Anchored where the
-attacker cannot rewind them (PSA ITS, a monotonic counter, a secure element),
-its counters show the flash going back in time. Each goes down in normal use
-only as listed:
+An earlier state of the flash is as genuine as the current one, so UBI cannot
+reject it by itself. The application can, if it remembers where the device
+was. At every attach, and every `CONFIG_UBI_STATE_CHECK_INTERVAL` flash
+writes, UBI passes `struct ubi_device_info` to the state callback, which
+decides whether to trust the device. A verdict of `UBI_STATE_UNTRUSTED` fails
+the attach with `-EROFS`. On an attached device, it makes every write fail
+with `-EROFS` until the next attach, while reads still work.
 
-| counter | goes down in normal use |
+Good practice:
+
+- Keep the last trusted values of the counters below in storage the attacker
+  cannot roll back, such as PSA Internal Trusted Storage, a monotonic counter
+  or a secure element.
+- Save the new values before the callback returns `UBI_STATE_TRUSTED`.
+- Before formatting on purpose, set a flag in the same storage, so that the
+  callback accepts the new image once.
+- After creating, resizing or removing a volume, save the new `revision` from
+  `ubi_device_get_info()` at once, rather than at the next check.
+
+| Counter | In normal use |
 |---|---|
-| `image_seq` | never; it changes only at a format |
-| `revision` | never within one `image_seq` |
-| `max_sqnum` | across a reboot, once the blocks carrying the highest numbers are erased |
-| `healthy_pebs` | when a header is damaged, a write is cut short or a block is retired |
-| `total_erase_count` | only when a block leaves `healthy_pebs` |
+| `image_seq` | Drawn at random by each format; never changes otherwise. |
+| `revision` | Grows with every volume create, resize and remove, and every volume table repair. Never goes down. |
+| `max_sqnum` | Grows with every header written. After a reboot it may be slightly lower, if the newest headers were erased. |
+| `healthy_pebs` | Grows as reclaim prepares blocks after a format. Goes down when a header is damaged, a write is cut short or a block is retired. |
+| `total_erase_count` | Grows with every erase. Goes down only by the erase counts of blocks that left `healthy_pebs`. |
 
-`image_seq` and `revision` catch the flash put back to a copy taken before the
-last layout change, or to another image. A copy taken since keeps both; only
-`max_sqnum` and `total_erase_count` show it, lower by the headers written and
-the erases made since. A check built on them has to allow for their drops in
-normal use.
+`image_seq` and `revision` never go back, so compare them exactly. They catch
+a flash restored from before the last format or the last change to the
+volumes. A copy taken after that has the same values, but lower `max_sqnum`
+and `total_erase_count`, since these grow with every write and erase. Both
+may drop a little in normal use, so compare them within a tolerance.
 
-The rule the sample uses: the same image, at a revision no older than the last
-one, and a new image only after a format the application asked for itself.
+The whole check, in pseudocode:
 
-```c
-static enum ubi_state_verdict on_state(const struct ubi_device_info *info,
-				       void *user_context)
-{
-	struct anchor *kept = user_context;	/* read from the trusted store */
+```text
+# Tolerances, set from how the application uses the device
+SQNUM_SLACK   = newest headers it may erase before writing again
+HEALTHY_SLACK = blocks that may lose their header between two checks
 
-	if (kept->anchored && !kept->format_authorised) {
-		if (info->image_seq != kept->image_seq)
-			return UBI_STATE_UNTRUSTED;
+on_state(info):
+    kept = trusted_store.load()
 
-		if (info->revision < kept->revision)
-			return UBI_STATE_UNTRUSTED;
-	}
+    if kept is empty:                         # nothing stored yet
+        return accept(info)
 
-	/* Commit these to the trusted store before returning. */
-	kept->anchored = true;
-	kept->format_authorised = false;
-	kept->image_seq = info->image_seq;
-	kept->revision = info->revision;
+    if info.image_seq != kept.image_seq:      # another image
+        if not kept.format_requested:
+            return UNTRUSTED
+        return accept(info)
 
-	return UBI_STATE_TRUSTED;
-}
+    if info.revision < kept.revision:         # an older volume layout
+        return UNTRUSTED
+
+    if info.max_sqnum + SQNUM_SLACK < kept.max_sqnum:
+        return UNTRUSTED                      # headers written since are gone
+
+    lost = max(0, kept.healthy_pebs - info.healthy_pebs)
+    if lost > HEALTHY_SLACK:
+        return UNTRUSTED                      # too many blocks lost at once
+
+    # A lost block takes its erase count out of the total.
+    if info.total_erase_count + lost * kept.max_erase_count
+            < kept.total_erase_count:
+        return UNTRUSTED                      # erases made since are gone
+
+    return accept(info)
+
+accept(info):
+    trusted_store.save(info.image_seq, info.revision, info.max_sqnum,
+                       info.healthy_pebs, info.total_erase_count,
+                       info.max_erase_count, format_requested = false)
+    return TRUSTED
 ```
 
-The callback runs at attach and every `CONFIG_UBI_STATE_CHECK_INTERVAL` flash
-writes. To keep the anchor exact, also record `revision` from
-`ubi_device_get_info()` after your own create, resize and remove calls.
+Without trusted storage, a rollback cannot be detected. The callback then
+returns `UBI_STATE_TRUSTED` every time, and the code shows that choice.
 
-An application with nowhere trusted to keep the anchor returns
-`UBI_STATE_TRUSTED` every time: rollback then goes undetected, by a decision
-visible in the code.
+## Protecting your data
 
-## One key per partition
+UBI stores the data in the volumes as it is written. Anyone who can read the
+flash can read it, and anyone who can write the flash can change it. The
+checksum UBI keeps for data written with `ubi_leb_change()` detects
+accidental damage, not deliberate changes. If the data needs protection, add
+it in the application:
 
-The MAC binds a header to its block number, not to its partition. Two
-partitions under the same keys accept each other's blocks. Give each a
-`key_context` of its own, such as its name, or keying material of its own.
+- Encrypt and authenticate the data with an authenticated cipher, under a key
+  held in the PSA key store. That key can be derived from the key you give
+  UBI, under a label of your own.
+- Include the volume name and the LEB number in the authenticated data, so
+  that a block moved elsewhere no longer verifies.
+- Never use a nonce twice with the same key. `ubi_leb_change()` rewrites a
+  LEB from its start, so a nonce based on the position in the LEB would
+  repeat; take it from a counter or a random source, and store it with the
+  data.
+- Where old contents must not be accepted again, add a version number kept
+  in trusted storage; see [Limits](#limits).
 
-## Your data
-
-**UBI does not encrypt data**, and authenticates only its own metadata. Anyone
-with the raw flash reads volume names, sizes, erase counts and contents.
-
-Protect data with an AEAD of your own:
-
-> **Bind it to `vol_id` and `lnum`, and use a new nonce for every version of
-> a block.**
-
-`ubi_leb_change()` starts a block again from offset zero, so a nonce tied to
-the offset alone repeats. In GCM a repeated nonce leaks the authentication
-subkey.
-
-## Damage and tampering
-
-Every header carries a MAC and then a CRC over everything before it, the MAC
-included. A torn write fails the CRC and is reported as
-`UBI_EVENT_HDR_CORRUPT`; a changed field with a recomputed CRC fails the MAC
-and is reported as `UBI_EVENT_HDR_TAMPERED`.
-
-The volume table record has one event, `UBI_EVENT_VOLUME_TABLE_CORRUPT`: its
-checksum sits in the sealed header in front of it, so whoever could fix that
-checksum already holds the key.
-
-The data checksum tells a change cut short from a whole one, not tampering
-from damage. Relocation seals a copy afresh, so damage that set in before the
-move travels with it; your AEAD catches it.
-
-## Damaged blocks are kept
-
-A block whose erase counter header verifies but whose volume identifier header
-does not, over data that is not blank, is kept as it is: counted in
-`corrupt_pebs`, never allocated, erased or moved until
-`UBI_MAINTENANCE_DISCARD`. Attach refuses the partition once such blocks reach
-a twentieth of its good blocks, rounded down, or eight when that is zero: a
-partition that damaged is probably not the one it appears to be.
+Once a LEB has contents, `ubi_leb_change()` replaces them atomically, so a
+protected record is always read back whole: the old one or the new one.

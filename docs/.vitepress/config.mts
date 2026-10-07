@@ -25,7 +25,8 @@ if (commit)
 
 export default defineConfig({
   title: 'UBI for Zephyr',
-  description: 'A volume manager for raw flash, built as a Zephyr module',
+  description:
+    'Unsorted Block Images (UBI): a volume manager for raw flash, built as a Zephyr module',
   base: `/${name}/`,
   cleanUrls: true,
 

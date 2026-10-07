@@ -1,4 +1,4 @@
-# UBI for Zephyr
+# Unsorted Block Images (UBI) for Zephyr
 
 [![CI / Zephyr](https://github.com/kamil-kielbasa/zephyr-ubi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kamil-kielbasa/zephyr-ubi/actions/workflows/ci.yml)
 [![CI / Documentation](https://github.com/kamil-kielbasa/zephyr-ubi/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/kamil-kielbasa/zephyr-ubi/actions/workflows/docs.yml)
@@ -9,32 +9,39 @@
 [![Zephyr](https://img.shields.io/badge/Zephyr-4.4-blueviolet)](https://zephyrproject.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A volume manager for raw flash, built as a Zephyr module. It brings the design
-of Linux UBI to microcontrollers: one flash partition divided into named
-volumes, wear spread across it, block updates that survive power loss, and its
-own metadata authenticated with AES-CMAC.
+Unsorted Block Images (UBI) is a volume manager for raw flash, ported from
+Linux to Zephyr. Raw flash is erased only in whole blocks, each block wears out
+after a limited number of erases, and a power cut can leave an update half
+done. UBI splits one flash partition into named volumes and stores their
+logical blocks in physical erase blocks in any order, hence *unsorted*. Moving
+blocks freely lets it spread erases evenly, replace a block atomically and
+take failing blocks out of use. Its own metadata is authenticated with
+AES-CMAC.
 
 ## Features
 
-| | UBI for Zephyr | Linux UBI |
-|---|:---:|:---:|
-| Named volumes, created, resized and removed at run time | ✓ | ✓ |
-| Volume rename | ✗ | ✓ |
-| Static volumes | ✗ | ✓ |
-| Atomic block replace, `ubi_leb_change()` | ✓ | ✓ |
-| Appends with no erase, `ubi_leb_write_at()` | ✓ | ✓ |
-| Wear levelling and erasing of released blocks | on demand | background thread |
-| Scrubbing after bit flips | ✗ | ✓ |
-| Fastmap | ✗ | ✓ |
-| Headers and volume table authenticated with AES-CMAC | ✓ | ✗ |
-| Damage and tampering reported apart | ✓ | ✗ |
-| Rollback check through a state callback | ✓ | ✗ |
-| Block header re-authenticated on every read | option | ✗ |
+- **Named volumes** — created, resized and removed at run time.
+- **Atomic block updates** — `ubi_leb_change()` replaces a logical block
+  whole: after a power cut, it holds the old contents or the new.
+- **Appends** — `ubi_leb_write_at()` adds data to a logical block without an
+  erase.
+- **Power-cut safety** — volume changes, erases and maintenance steps survive
+  a power cut at any point.
+- **Wear levelling** — erases are spread over the whole partition, and data
+  that does not change is moved so that its block wears too.
+- **Bad block handling** — a block that fails a write is taken out of use
+  until the next attach; a failed erase makes the device read-only.
+- **Authenticated metadata** — block headers and the volume table carry an
+  AES-CMAC under a key derived from a PSA Crypto key; damage and tampering are
+  reported apart. `CONFIG_UBI_VERIFY_ON_READ` checks the block header again on
+  every read.
+- **Rollback detection** — a state callback decides whether to trust the
+  device, at every attach and every `CONFIG_UBI_STATE_CHECK_INTERVAL` writes.
+- **Maintenance on demand** — erasing and wear levelling run in
+  `ubi_maintenance()`, on a budget the application chooses; no background
+  thread.
 
-On demand means `ubi_maintenance()`, on a budget the application chooses; a
-write that finds no free block erases one itself. Headers are laid out as in
-Linux UBI, with the MAC in space Linux leaves as padding. Application data is
-stored as given: neither encrypted nor authenticated.
+Application data is stored as given: neither encrypted nor authenticated.
 
 ## Requirements
 
@@ -58,8 +65,8 @@ Full documentation: <https://kamil-kielbasa.github.io/zephyr-ubi/>.
 
 | Document | What you will find |
 |---|---|
-| [How it works](https://kamil-kielbasa.github.io/zephyr-ubi/how-it-works) | Blocks and their states, attach, writing, wear levelling, maintenance |
-| [Security](https://kamil-kielbasa.github.io/zephyr-ubi/security) | Threat model, rollback detection, what protecting data is left to you |
+| [How it works](https://kamil-kielbasa.github.io/zephyr-ubi/how-it-works) | Logical and physical blocks, attach, damaged headers, bad blocks, wear levelling, maintenance |
+| [Security](https://kamil-kielbasa.github.io/zephyr-ubi/security) | How the metadata is protected, threat model, limits, rollback detection, protecting your data |
 | [Examples](https://kamil-kielbasa.github.io/zephyr-ubi/examples) | Setup, attaching, volumes, appends, key provisioning, maintenance |
 | [Operations](https://kamil-kielbasa.github.io/zephyr-ubi/operations) | Errors, events, power loss, maintenance, key changes, resources |
 | [On-flash format](https://kamil-kielbasa.github.io/zephyr-ubi/on-flash-format) | Headers, the volume table and key derivation, byte by byte |

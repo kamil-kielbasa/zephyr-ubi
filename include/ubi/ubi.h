@@ -3,11 +3,6 @@
  * \author  Kamil Kielbasa
  * \brief   Unsorted Block Images (UBI) public API.
  *
- *          Maps logical erase blocks (LEB) onto physical erase blocks (PEB),
- *          spreads wear across the partition, survives power loss and
- *          authenticates its own metadata with AES-CMAC. Application data is
- *          stored as it is given. Key material enters as a PSA key handle.
- *
  * \copyright Copyright (c) 2026
  *
  */
@@ -25,22 +20,12 @@
 /* UBI headers: */
 #include <ubi/types.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 /* Module interface function declarations ---------------------------------- */
 
-/** \defgroup ubi-api-device UBI device lifecycle
- * @{
- */
+/* Device lifecycle */
 
 /**
  * \brief Size in bytes of a UBI device handle.
- *
- *        Allocate at least this many bytes for the \ref ubi_device passed to
- *        \ref ubi_device_init. Everything that grows with the partition is
- *        taken from the heap when the device attaches.
  *
  * \return Size in bytes of \ref ubi_device.
  */
@@ -49,44 +34,41 @@ size_t ubi_device_size(void);
 /**
  * \brief Turn a partition into an empty UBI device.
  *
- *        Writes a fresh image sequence number and both volume table copies,
- *        and erases every volume table an earlier format left. Other blocks
- *        belong to no device any more and are erased when first needed; until
- *        then they stay readable from raw flash, so run
- *        #UBI_MAINTENANCE_RECLAIM to the end where that matters. Erase counts
- *        are carried over. A format cut short leaves the earlier device or
- *        the new one.
+ *        Writes a new volume table, then erases the old one. All volumes of
+ *        the previous device are lost. Their blocks are erased later, by
+ *        #UBI_MAINTENANCE_RECLAIM or when a write needs them, and stay
+ *        readable from raw flash until then. Erase counts are kept. A power
+ *        cut leaves the previous device or the new one.
  *
  * \param[in] config                    Partition, key handle and callbacks.
  *
  * \retval 0
  *         Formatted.
  * \retval -EINVAL
- *         \p config is incomplete, its key context does not fit, or the
- *         partition is not made of whole erase blocks of one size.
+ *         Invalid configuration, or the partition is unusable.
  * \retval -EACCES
- *         \p ikm_key_id is missing, or may not derive with HKDF-SHA256.
+ *         The key does not exist or does not allow HKDF-SHA256 derivation.
  * \retval -EBUSY
- *         The partition is attached, or another format of it is running.
+ *         The partition is in use.
  * \retval -ENOSPC
- *         The partition holds fewer blocks than UBI needs, or more than a
- *         16-bit block number addresses.
+ *         The partition is too large, or has too few usable blocks.
  * \retval -ENOMEM
  *         Not enough heap.
  * \retval -EIO
- *         Flash driver failure.
+ *         Flash or crypto failure.
  */
 int ubi_device_format(const struct ubi_config *config);
 
 /**
  * \brief Attach a formatted partition.
  *
- *        Reads every block, verifies every header and the data of every
- *        sealed block, rebuilds the logical-to-physical map in RAM and asks
- *        the state callback whether to trust the result. Writes nothing, so a
- *        failed attach leaves the flash as it was.
+ *        Reads the whole partition, verifies the UBI metadata and asks the
+ *        state callback whether to trust the device. Writes nothing to the
+ *        flash.
  *
- *        Only \c -ENODEV means there is nothing on the partition to lose.
+ *        Format the partition only after \c -ENODEV: any other error means
+ *        a UBI device may be there, and a format would destroy it. What to
+ *        do on each error: docs/operations.md.
  *
  * \param[in,out] ubi                   Storage of \ref ubi_device_size bytes.
  * \param[in] config                    Partition, key handle and callbacks.
@@ -94,82 +76,70 @@ int ubi_device_format(const struct ubi_config *config);
  * \retval 0
  *         Attached.
  * \retval -EINVAL
- *         \p config is incomplete, its key context does not fit, the
- *         partition is not made of whole erase blocks of one size, its
- *         geometry differs from the one formatted, or too many blocks are
- *         corrupt.
+ *         Invalid configuration, or the partition is unusable.
  * \retval -EACCES
- *         \p ikm_key_id is missing, or may not derive with HKDF-SHA256.
+ *         The key does not exist or does not allow HKDF-SHA256 derivation.
  * \retval -EBUSY
- *         \p ubi is attached already, or the partition is attached or being
- *         formatted.
+ *         The handle or the partition is in use.
  * \retval -ENODEV
- *         No UBI metadata at all: the partition is blank or holds someone
- *         else's bytes. \ref ubi_device_format it if that is expected.
+ *         No UBI device on the partition: it is blank or holds other data.
  * \retval -EBADMSG
- *         UBI metadata that will not verify: the wrong key, both volume
- *         table copies damaged, or data with no volume table left.
+ *         UBI metadata failed verification: a different key, damage or
+ *         tampering.
  * \retval -ENOTSUP
- *         Written by a release this build cannot read, or with more volumes
- *         than \c CONFIG_UBI_MAX_NR_OF_VOLUMES allows.
+ *         Written by a newer release, or with more volumes than
+ *         \c CONFIG_UBI_MAX_NR_OF_VOLUMES.
  * \retval -ENOSPC
- *         More blocks than a 16-bit block number addresses, or a volume
- *         table that declares more logical blocks than the partition has.
+ *         The partition is too large, or its volumes do not fit in it.
  * \retval -ENOMEM
- *         Not enough heap for the bookkeeping of this partition.
+ *         Not enough heap.
  * \retval -EROFS
  *         The state callback returned #UBI_STATE_UNTRUSTED.
  * \retval -EIO
- *         Flash driver or crypto backend failure. A block that cannot be
- *         read says nothing about what it holds; try again.
+ *         Flash or crypto failure.
  */
 int ubi_device_init(struct ubi_device *ubi, const struct ubi_config *config);
 
 /**
  * \brief Detach a device and destroy its derived keys.
  *
- *        Loses nothing: everything UBI needs is on the flash. The next attach
- *        finds again what was waiting for reclaim, maps back a block unmapped
- *        since, gives retired blocks another chance and lifts a read-only
- *        state. No other thread may use \p ubi during or after the call.
+ *        Every write is already on the flash, so nothing is lost. Call it
+ *        only when no other thread uses the device.
  *
  * \param[in,out] ubi                   Attached device.
  *
  * \retval 0
  *         Detached.
  * \retval -EINVAL
- *         \p ubi is not attached.
+ *         The device is not attached.
  * \retval -EDEADLK
  *         Called from one of the device's own callbacks.
  */
 int ubi_device_deinit(struct ubi_device *ubi);
 
 /**
- * \brief Read geometry, block accounting and rollback counters, from RAM.
+ * \brief Get device information.
  *
  * \param[in] ubi                       Attached device.
- * \param[out] info                     Receives the device state.
+ * \param[out] info                     Receives the device information.
  *
  * \retval 0
  *         Success.
  * \retval -EINVAL
- *         \p ubi is not attached, or \p info is \c NULL.
+ *         Invalid argument.
  * \retval -EFAULT
- *         A block carries a state UBI never wrote: the handle is corrupted.
+ *         The handle is corrupted.
  */
 int ubi_device_get_info(struct ubi_device *ubi, struct ubi_device_info *info);
 
-/**@}*/
-
-/** \defgroup ubi-api-volume UBI volume management
- * @{
- */
+/* Volume management */
 
 /**
- * \brief Create a volume and write it to the volume table.
+ * \brief Create a volume.
  *
- *        Reserves \p leb_count logical blocks but takes no physical ones
- *        until they are written. The identifier is never reused.
+ *        Takes \p config->leb_count logical erase blocks (LEBs) from the free
+ *        LEBs of the device. Physical erase blocks are used only once the
+ *        LEBs are written. Identifiers are not reused until the next format.
  *
  * \param[in,out] ubi                   Attached device.
  * \param[in] config                    Name and size.
@@ -178,56 +148,57 @@ int ubi_device_get_info(struct ubi_device *ubi, struct ubi_device_info *info);
  * \retval 0
  *         Created.
  * \retval -EINVAL
- *         \p ubi is not attached, the name is empty or too long, or the size
- *         is zero.
+ *         Invalid argument.
  * \retval -EEXIST
  *         A volume with that name exists.
  * \retval -ENOSPC
- *         Not enough logical blocks left, or the volume limit is reached.
+ *         Not enough free LEBs, or no more volumes can be created.
  * \retval -EROFS
  *         The device is read-only: an erase failed, or the state callback
- *         withdrew its trust.
+ *         returned #UBI_STATE_UNTRUSTED.
  * \retval -EIO
- *         Flash driver failure.
+ *         Flash failure.
  */
 int ubi_volume_create(struct ubi_device *ubi,
 		      const struct ubi_volume_config *config, uint32_t *vol_id);
 
 /**
- * \brief Give a volume a new size in logical blocks.
+ * \brief Change the size of a volume.
  *
- *        Growing takes from the shared pool and adds unmapped blocks;
- *        shrinking hands blocks back and is refused while one past the new
- *        size is still mapped.
+ *        Growing adds unmapped LEBs at the end of the volume, taken from the
+ *        free LEBs of the device. Shrinking removes LEBs from the end, and
+ *        they have to be unmapped first with \ref ubi_leb_unmap or
+ *        \ref ubi_leb_erase. For example, shrinking from 8 to 6 LEBs needs
+ *        LEBs 6 and 7 unmapped.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume to resize.
- * \param leb_count                     New size, at least one block.
+ * \param leb_count                     New size in LEBs, at least one.
  *
  * \retval 0
  *         Resized, or already that size.
  * \retval -EINVAL
- *         \p ubi is not attached, or \p leb_count is zero.
+ *         Invalid argument.
  * \retval -ENOENT
  *         No such volume.
  * \retval -EBUSY
- *         A logical block past \p leb_count is still mapped.
+ *         A LEB that shrinking removes is still mapped.
  * \retval -ENOSPC
- *         The pool has fewer logical blocks left than the growth asks for.
+ *         Not enough free LEBs to grow.
  * \retval -EROFS
  *         The device is read-only: an erase failed, or the state callback
- *         withdrew its trust.
+ *         returned #UBI_STATE_UNTRUSTED.
  * \retval -EIO
- *         Flash driver failure.
+ *         Flash failure.
  */
 int ubi_volume_resize(struct ubi_device *ubi, uint32_t vol_id,
 		      uint32_t leb_count);
 
 /**
- * \brief Remove a volume and release its blocks.
+ * \brief Remove a volume.
  *
- *        The blocks are queued for #UBI_MAINTENANCE_RECLAIM, not erased, and
- *        stay readable from raw flash until they are.
+ *        Its blocks are erased later, by #UBI_MAINTENANCE_RECLAIM or when a
+ *        write needs them, and stay readable from raw flash until then.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume to remove.
@@ -235,22 +206,19 @@ int ubi_volume_resize(struct ubi_device *ubi, uint32_t vol_id,
  * \retval 0
  *         Removed.
  * \retval -EINVAL
- *         \p ubi is not attached.
+ *         Invalid argument.
  * \retval -ENOENT
  *         No such volume.
  * \retval -EROFS
  *         The device is read-only: an erase failed, or the state callback
- *         withdrew its trust.
+ *         returned #UBI_STATE_UNTRUSTED.
  * \retval -EIO
- *         Flash driver failure.
+ *         Flash failure.
  */
 int ubi_volume_remove(struct ubi_device *ubi, uint32_t vol_id);
 
 /**
- * \brief Look up a volume identifier by name.
- *
- *        Identifiers change with every \ref ubi_device_format, so resolve
- *        them by name after each attach.
+ * \brief Find a volume by name.
  *
  * \param[in] ubi                       Attached device.
  * \param[in] name                      NUL-terminated volume name.
@@ -259,41 +227,42 @@ int ubi_volume_remove(struct ubi_device *ubi, uint32_t vol_id);
  * \retval 0
  *         Found.
  * \retval -EINVAL
- *         \p ubi is not attached, or an argument is \c NULL.
+ *         Invalid argument.
  * \retval -ENOENT
  *         No volume with that name.
  */
 int ubi_volume_find(struct ubi_device *ubi, const char *name, uint32_t *vol_id);
 
 /**
- * \brief Read a volume's properties.
+ * \brief Get volume information.
  *
  * \param[in] ubi                       Attached device.
  * \param vol_id                        Volume to inspect.
- * \param[out] info                     Receives the volume properties.
+ * \param[out] info                     Receives the volume information.
  *
  * \retval 0
  *         Success.
  * \retval -EINVAL
- *         \p ubi is not attached, or \p info is \c NULL.
+ *         Invalid argument.
  * \retval -ENOENT
  *         No such volume.
  */
 int ubi_volume_get_info(struct ubi_device *ubi, uint32_t vol_id,
 			struct ubi_volume_info *info);
 
-/**@}*/
-
-/** \defgroup ubi-api-leb UBI logical erase block operations
- * @{
- */
+/* Logical erase block operations */
 
 /**
- * \brief Give a logical erase block a physical one, without writing data.
+ * \brief Map a LEB to an empty physical erase block.
  *
- *        The block reads as erased afterwards, and stays mapped across an
- *        unclean reboot. \ref ubi_leb_write_at and \ref ubi_leb_change map on
- *        their own.
+ *        Writes a header with no data to a free physical erase block. The
+ *        LEB then reads as erased, and the next attach keeps it mapped and
+ *        empty. \ref ubi_leb_write_at writes into this block;
+ *        \ref ubi_leb_change replaces it as usual.
+ *
+ *        Use it right after \ref ubi_leb_unmap, so that the next attach does
+ *        not bring the old contents back, or to move the block allocation
+ *        out of the first \ref ubi_leb_write_at.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
@@ -302,34 +271,32 @@ int ubi_volume_get_info(struct ubi_device *ubi, uint32_t vol_id,
  * \retval 0
  *         Mapped.
  * \retval -EINVAL
- *         \p ubi is not attached, or \p lnum is out of range.
+ *         Invalid argument.
  * \retval -ENOENT
  *         No such volume.
  * \retval -EEXIST
- *         The block is mapped already. Linux UBI returns \c -EBADMSG, which
- *         here only ever means a failed authentication.
+ *         The LEB is already mapped.
  * \retval -ENOSPC
- *         No physical block available.
+ *         No physical erase block is available.
  * \retval -EROFS
  *         The device is read-only: an erase failed, or the state callback
- *         withdrew its trust.
+ *         returned #UBI_STATE_UNTRUSTED.
  * \retval -EIO
- *         Flash driver failure.
+ *         Flash failure.
  */
 int ubi_leb_map(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
 
 /**
- * \brief Detach a logical erase block from its physical one.
+ * \brief Unmap a LEB from its physical erase block.
  *
- *        Drops the mapping in RAM and queues the block for
- *        #UBI_MAINTENANCE_RECLAIM. Afterwards the LEB reads as erased and
- *        the next write takes another block. Unmapping an unmapped LEB does
- *        nothing.
+ *        The LEB reads as erased from now on. Nothing is written to the
+ *        flash: the old block is erased later, by #UBI_MAINTENANCE_RECLAIM
+ *        or when a write needs it. Until then, the next attach brings the
+ *        old contents back, unless the LEB was written again.
+ *        \ref ubi_leb_map right after prevents that; \ref ubi_leb_erase
+ *        erases the contents at once.
  *
- *        **Nothing is written to the flash.** Until the queued erase runs,
- *        the block still names this LEB and the next attach maps it back,
- *        with the contents it had when unmapped and never older ones. Use
- *        \ref ubi_leb_erase where that matters.
+ *        Unmapping an unmapped LEB does nothing.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
@@ -338,24 +305,22 @@ int ubi_leb_map(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
  * \retval 0
  *         Unmapped.
  * \retval -EINVAL
- *         \p ubi is not attached, or \p lnum is out of range.
+ *         Invalid argument.
  * \retval -ENOENT
  *         No such volume.
  * \retval -EROFS
  *         The device is read-only: an erase failed, or the state callback
- *         withdrew its trust.
+ *         returned #UBI_STATE_UNTRUSTED.
  */
 int ubi_leb_unmap(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
 
 /**
- * \brief Detach a logical erase block and erase it now.
+ * \brief Unmap a LEB and erase its contents now.
  *
- *        What \ref ubi_leb_unmap promises eventually, this promises on
- *        return: the block is erased, and so is every older copy of it still
- *        waiting for reclaim, one an earlier unmap left included, so the
- *        contents are gone for good. Costs one erase per copy. An erase that
- *        fails leaves the device read-only, and no copy that could not be
- *        erased is ever reported gone.
+ *        Erases the physical erase block of the LEB and every old copy of it
+ *        left by \ref ubi_leb_change or \ref ubi_leb_unmap, one erase each.
+ *        On return the contents are gone, and the next attach does not bring
+ *        them back. On an unmapped LEB it erases only the old copies.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
@@ -364,27 +329,26 @@ int ubi_leb_unmap(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
  * \retval 0
  *         Erased, or there was nothing to erase.
  * \retval -EINVAL
- *         \p ubi is not attached, or \p lnum is out of range.
+ *         Invalid argument.
  * \retval -ENOENT
  *         No such volume.
  * \retval -EROFS
  *         The device is read-only: an erase failed, or the state callback
- *         withdrew its trust.
+ *         returned #UBI_STATE_UNTRUSTED.
  * \retval -EIO
- *         Flash driver failure. The block that could not be erased is
- *         retired, the device is read-only, and what it held may come back
- *         after a reboot.
+ *         Flash failure. The contents may come back at the next attach, and
+ *         a failed erase makes the device read-only.
  */
 int ubi_leb_erase(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
 
 /**
- * \brief Read from a logical erase block.
+ * \brief Read from a LEB.
  *
- *        One flash read, since the mapping is in RAM. With
- *        \c CONFIG_UBI_VERIFY_ON_READ the header is read and verified first,
- *        and has to name this logical block in this image. The data itself
- *        is judged at attach. Bytes never written, and an unmapped LEB, read
- *        as erased.
+ *        Unwritten bytes and unmapped LEBs read as erased flash, usually
+ *        0xFF. Data is returned as stored: data written with
+ *        \ref ubi_leb_change is checked at attach, not here. With
+ *        \c CONFIG_UBI_VERIFY_ON_READ the block header is authenticated
+ *        before each read.
  *
  * \param[in] ubi                       Attached device.
  * \param vol_id                        Volume.
@@ -398,166 +362,156 @@ int ubi_leb_erase(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum);
  * \retval 0
  *         Success.
  * \retval -EINVAL
- *         \p ubi is not attached, \p lnum is out of range, or the range
- *         spills past the end of the LEB.
+ *         Invalid argument.
  * \retval -ENOENT
  *         No such volume.
  * \retval -EBADMSG
- *         Only with \c CONFIG_UBI_VERIFY_ON_READ: the header failed its CMAC
- *         or names another logical block or another image.
+ *         The block header failed verification. Only with
+ *         \c CONFIG_UBI_VERIFY_ON_READ.
  * \retval -EIO
- *         Flash driver failure.
+ *         Flash failure.
  */
 int ubi_leb_read(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 		 uint32_t offset, void *buffer, size_t length);
 
 /**
- * \brief Replace the contents of a logical erase block atomically.
+ * \brief Replace the contents of a LEB atomically.
  *
- *        Writes a fresh physical block and moves the mapping only once the
- *        data is down, so a power loss leaves the old contents or the new
- *        ones. A LEB that had no contents keeps what reached the flash, and
- *        the next attach reports a partial copy with #UBI_EVENT_DATA_CORRUPT.
- *        The old block is queued for reclaim.
+ *        Writes the data to a new physical erase block, then switches the
+ *        LEB to it; the old block is erased later. Bytes past \p length read
+ *        as erased. After a power cut the LEB holds the old contents or the
+ *        new. If there are no old contents, it holds the part of the new
+ *        data that was written, and the next attach reports
+ *        #UBI_EVENT_DATA_CORRUPT.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
  * \param lnum                          Logical erase block number.
  * \param[in] buffer                    Data to write.
- * \param length                        Bytes to write: whole write blocks,
- *                                      at most the LEB size. Zero does
- *                                      nothing.
+ * \param length                        Bytes to write: a multiple of the
+ *                                      write block size, at most the LEB
+ *                                      size. Zero does nothing.
  *
  * \retval 0
- *         The new contents are durable, or \p length was zero.
+ *         The new contents are on the flash, or \p length was zero.
  * \retval -EINVAL
- *         \p ubi is not attached, \p lnum is out of range, or \p length is
- *         not whole write blocks within the LEB.
+ *         Invalid argument.
  * \retval -ENOENT
  *         No such volume.
  * \retval -ENOSPC
- *         No physical block available.
+ *         No physical erase block is available.
  * \retval -EROFS
  *         The device is read-only: an erase failed, or the state callback
- *         withdrew its trust.
+ *         returned #UBI_STATE_UNTRUSTED.
  * \retval -EIO
- *         Flash driver failure; the LEB still holds its previous contents.
+ *         Flash failure; the LEB keeps its old contents.
  */
 int ubi_leb_change(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 		   const void *buffer, size_t length);
 
 /**
- * \brief Write to a logical erase block at a caller-chosen offset.
+ * \brief Write to a LEB at a given offset.
  *
- *        Places the bytes where asked and promises nothing more:
+ *        Not atomic, and no length is stored: after a power cut the
+ *        application finds the end of its data itself. An unmapped LEB is
+ *        mapped first.
  *
- *        - \p offset and \p length are whole write blocks.
- *        - An unmapped LEB is mapped on the way.
- *        - Writes to one LEB go in rising order, each at or past the end of
- *          the previous one, until the next \ref ubi_leb_change,
- *          \ref ubi_leb_unmap or \ref ubi_leb_erase. Relocation seals a block
- *          up to its last written byte, and flash cannot take a second write
- *          over written bytes.
- *        - No length is stored: after a reboot the application finds its
- *          own frontier and detects a partial append itself.
+ *        Writes go in rising order: each starts at or after the end of the
+ *        previous one, and a gap left below written data must stay
+ *        unwritten. This holds until the LEB is changed, unmapped or erased.
  *
  * \param[in,out] ubi                   Attached device.
  * \param vol_id                        Volume.
  * \param lnum                          Logical erase block number.
- * \param offset                        Byte offset within the LEB.
+ * \param offset                        Byte offset within the LEB, a multiple
+ *                                      of the write block size.
  * \param[in] buffer                    Data to write.
- * \param length                        Bytes to write. Zero does nothing.
+ * \param length                        Bytes to write, a multiple of the
+ *                                      write block size, ending within the
+ *                                      LEB. Zero does nothing.
  *
  * \retval 0
- *         The bytes were written, or \p length was zero.
+ *         The data is written, or \p length was zero.
  * \retval -EINVAL
- *         \p ubi is not attached, \p lnum is out of range, the range spills
- *         past the end of the LEB, or it is not whole write blocks.
+ *         Invalid argument.
  * \retval -ENOENT
  *         No such volume.
  * \retval -ENOSPC
- *         The LEB was unmapped and no physical block was available.
+ *         The LEB was unmapped and no physical erase block is available.
  * \retval -EROFS
  *         The device is read-only: an erase failed, or the state callback
- *         withdrew its trust.
+ *         returned #UBI_STATE_UNTRUSTED.
  * \retval -EIO
- *         Flash driver failure.
+ *         Flash failure; part of the data may be written.
  */
 int ubi_leb_write_at(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 		     uint32_t offset, const void *buffer, size_t length);
 
 /**
- * \brief Read the mapping state of a logical erase block, from RAM.
+ * \brief Get the mapping state of a LEB.
  *
  * \param[in] ubi                       Attached device.
  * \param vol_id                        Volume.
  * \param lnum                          Logical erase block number.
- * \param[out] info                     Receives the block state.
+ * \param[out] info                     Receives the LEB state.
  *
  * \retval 0
  *         Success.
  * \retval -EINVAL
- *         \p ubi is not attached, \p lnum is out of range, or \p info is
- *         \c NULL.
+ *         Invalid argument.
  * \retval -ENOENT
  *         No such volume.
  */
 int ubi_leb_get_info(struct ubi_device *ubi, uint32_t vol_id, uint32_t lnum,
 		     struct ubi_leb_info *info);
 
-/**@}*/
-
-/** \defgroup ubi-api-maintenance UBI maintenance
- * @{
- */
+/* Maintenance */
 
 /**
- * \brief Perform deferred housekeeping, up to a caller-set budget.
+ * \brief Run one maintenance operation, up to a budget of steps.
  *
- *        There is no background thread: erasing and relocating happen here,
- *        when the application can afford the latency. An erase takes tens of
- *        milliseconds to seconds, so a budget of one is a reasonable slice.
- *        A reclaim step may erase every copy of the logical block an unmap
- *        let go of. A relocation step copies a block, reads the copy back and
- *        erases the old one; the LEB reads the same before and after.
+ *        Maintenance refills the free pool, levels wear and repairs damage.
+ *        One step of each operation:
  *
- *        A step that has taken effect stands even when the erase it ends
- *        with fails; the device is then read-only and the call stops.
+ *        - #UBI_MAINTENANCE_RECLAIM erases one of the \c reclaimable_pebs
+ *          and adds it to the free pool. A block released by
+ *          \ref ubi_leb_unmap is erased together with every old copy of its
+ *          LEB.
+ *        - #UBI_MAINTENANCE_RELOCATE moves the LEB of one of the
+ *          \c relocatable_pebs to a more worn free block, then erases the old
+ *          block. The LEB contents do not change.
+ *        - #UBI_MAINTENANCE_REPAIR rewrites the volume table when its copies
+ *          differ, or erases a retired block to give it another chance.
+ *        - #UBI_MAINTENANCE_DISCARD erases one of the \c corrupt_pebs and
+ *          returns it to service.
+ *
+ *        The call ends when \p budget steps are done, nothing is left, or
+ *        the device becomes read-only. Each step erases at least one block,
+ *        which takes milliseconds to seconds depending on the flash.
  *
  * \param[in,out] ubi                   Attached device.
- * \param operation                     Work to perform.
- * \param budget                        Most operations to perform. Zero only
- *                                      reports what is pending.
- * \param[out] result                   Work done and remaining, filled on
- *                                      every return but \c -EINVAL and
+ * \param operation                     Operation to run.
+ * \param budget                        Most steps to run. Zero only reports
+ *                                      the work left.
+ * \param[out] result                   Steps done and left. Filled on every
+ *                                      return but \c -EINVAL and
  *                                      \c -EDEADLK.
  *
  * \retval 0
- *         Success, including when there was nothing to do.
+ *         Done, or nothing to do.
  * \retval -EINVAL
- *         \p ubi is not attached, \p operation is unknown, or \p result is
- *         \c NULL.
+ *         Invalid argument.
  * \retval -EBADMSG
- *         Relocation found a block whose header does not verify, or whose
- *         data reads differently each time. It stays where it is, serving
- *         its LEB, and is not moved again until the next attach.
+ *         A block to relocate failed verification; it stays where it is.
  * \retval -EROFS
  *         The device is read-only: an erase failed, or the state callback
- *         withdrew its trust.
+ *         returned #UBI_STATE_UNTRUSTED.
  * \retval -EFAULT
- *         Relocation found a block in use that backs no LEB: the bookkeeping
- *         contradicts itself.
+ *         Internal state is inconsistent.
  * \retval -EIO
- *         Flash driver failure. If it was an erase, the device is read-only
- *         from then on.
+ *         Flash failure.
  */
 int ubi_maintenance(struct ubi_device *ubi, enum ubi_maintenance_op operation,
 		    uint32_t budget, struct ubi_maintenance_result *result);
-
-/**@}*/
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* UBI_H */
