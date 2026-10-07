@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.3 (2026-10-07)
+
+No change to the library or to the on-flash format.
+
+### CI
+
+- A run that GitHub failed although every job passed, for example by never
+  starting a job, is re-run once in full.
+
 ## v0.1.2 (2026-10-06)
 
 No change to the library code or to the on-flash format.

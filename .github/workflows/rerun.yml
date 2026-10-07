@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   rerun:
-    name: Re-run jobs whose Zephyr setup failed
+    name: Re-run after a failed Zephyr setup or a GitHub error
     if: >-
       github.event.workflow_run.conclusion == 'failure' &&
       github.event.workflow_run.run_attempt == 1
@@ -18,18 +18,25 @@ jobs:
     timeout-minutes: 5
     steps:
       # A setup that fails twice points at the runner; failed tests are never re-run.
-      - name: Re-run the failed jobs if only the Zephyr setup failed
+      - name: Re-run the run if neither a test nor a build failed
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           verdict=$(gh run view "$RUN_ID" --json jobs --jq '
-            [.jobs[] | select(.conclusion == "failure")]
-            | if length > 0 and all(.[]; all(.steps[] | select(.conclusion == "failure");
-                .name | startswith("Set up the Zephyr workspace")))
-              then "rerun" else "keep" end')
+            if all(.jobs[]; .conclusion == "success" or .conclusion == "skipped")
+            then "all"
+            else [.jobs[] | select(.conclusion == "failure")]
+              | if length > 0 and all(.[]; all(.steps[] | select(.conclusion == "failure");
+                  .name | startswith("Set up the Zephyr workspace")))
+                then "failed" else "keep" end
+            end')
           echo "Run $RUN_ID: $verdict"
-          if [ "$verdict" = rerun ]; then
+          # Every job passed, so GitHub failed the run, e.g. by never starting a job.
+          if [ "$verdict" = all ]; then
+            gh run rerun "$RUN_ID"
+          fi
+          if [ "$verdict" = failed ]; then
             gh run rerun "$RUN_ID" --failed
           fi
