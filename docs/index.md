@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: UBI for Zephyr
-  text: Volumes on raw flash
-  tagline: Wear levelling, power-loss safety and authenticated metadata, as a Zephyr module.
+  text: Unsorted Block Images
+  tagline: Named volumes on raw flash, with wear levelling, power-cut safety and authenticated metadata.
   actions:
     - theme: brand
       text: How it works
@@ -14,16 +14,28 @@ hero:
       link: /examples
 
 features:
-  - title: What it does
-    details: Named volumes, atomic block updates, appends, and wear levelling that runs when the application asks for it.
-    link: /how-it-works
-    linkText: How it works
-  - title: Security
-    details: Headers and the volume table are authenticated with AES-CMAC. What is caught, by whom, and where the boundary lies.
+  - title: Volumes on raw flash
+    details: Named volumes of logical blocks, created, resized and removed at run time. A block is replaced atomically, or appended to without an erase.
+    link: /how-it-works#logical-and-physical-blocks
+    linkText: Logical and physical blocks
+  - title: Wear levelling
+    details: Erases are spread over the whole partition, on a budget the application chooses.
+    link: /how-it-works#wear-levelling
+    linkText: Wear levelling
+  - title: Power-cut safety
+    details: Block updates, volume changes, erases and maintenance leave the old state or the new one.
+    link: /operations#power-loss
+    linkText: Power loss
+  - title: Authenticated metadata
+    details: Headers and the volume table carry an AES-CMAC. Tampering is reported apart from damage, and the state callback lets the application detect a rollback.
     link: /security
-    linkText: Threat model
+    linkText: Security
   - title: Examples
-    details: Adding the module, attaching, volumes, appends, key provisioning and maintenance.
+    details: Adding the module, attaching, volumes, appends, key provisioning and maintenance on a work queue.
     link: /examples
-    linkText: Code
+    linkText: Examples
+  - title: Operations
+    details: What each error and event means, what a power cut leaves behind, when to run maintenance, resources and limits.
+    link: /operations
+    linkText: Operations
 ---

@@ -1,8 +1,8 @@
 # On-flash format
 
 Format version 1. Every header and the volume table record carry a version
-byte; a build that meets one it does not know refuses the attach with
-`-ENOTSUP` and leaves the flash alone.
+byte. A build that finds a version it does not know refuses the attach with
+`-ENOTSUP` and leaves the flash unchanged.
 
 All multi-byte fields are big-endian.
 
@@ -17,8 +17,8 @@ offset 128   data                    to the end of the block
 Attach reads both headers in one 128-byte read. The write block has to divide
 64, so each header is a whole number of write blocks.
 
-Before a block is erased, the first four bytes of each header that still
-verifies are zeroed, padded to a whole write block, the erase counter header
+Before a block is erased, the first four bytes (the magic) of each valid
+header are zeroed, rounded up to a whole write block, the erase counter header
 first (`CONFIG_UBI_ERASE_INVALIDATES_HEADERS`).
 
 ## Erase counter header
@@ -43,7 +43,7 @@ unmodified Linux UBI.
 
 ## Volume identifier header
 
-Written when a logical block is mapped onto the physical one.
+Written when a LEB is mapped to the block.
 
 | offset | size | field | in Linux |
 |---|---|---|---|
@@ -62,12 +62,12 @@ Written when a logical block is mapped onto the physical one.
 | `0x34` | 8 | padding | `padding3[4..11]` |
 | `0x3C` | 4 | `hdr_crc`, CRC32 over `0x00..0x3B` | same |
 
-There are no static volumes, so `used_ebs` and `data_pad` are gone, and
-`data_crc` moves to free 16 contiguous bytes for the MAC.
+There are no static volumes, so `used_ebs` and `data_pad` are dropped, and
+`data_crc` moves to make 16 contiguous bytes free for the MAC.
 
 With `copy_flag` set, `data_crc` covers the first `data_size` bytes of data.
-`ubi_leb_change()` sets it; `ubi_leb_write_at()` does not, since a later
-append would break the checksum.
+`ubi_leb_change()` and relocation set it; `ubi_leb_write_at()` does not, since
+a later append would break the checksum.
 
 ## MAC and CRC
 
@@ -95,8 +95,8 @@ with a recomputed CRC fails the MAC.
 
 ## Volume table
 
-Two copies, in blocks naming the reserved volume `0xFFFFFFFE`, each a sealed
-record in the data area. The record:
+Two copies, in blocks of the reserved volume `0xFFFFFFFE`, each a record in
+the data area with `copy_flag` set. The record:
 
 | offset | size | field |
 |---|---|---|
@@ -107,7 +107,7 @@ record in the data area. The record:
 | `0x0C` | 4 | `image_seq` |
 | `0x10` | 4 | `peb_size` |
 | `0x14` | 4 | `peb_count` |
-| `0x18` | 4 | `vol_id_watermark`; identifiers are never reused |
+| `0x18` | 4 | `vol_id_watermark`, the next identifier; identifiers are not reused |
 | `0x1C` | 4 | `volume_count` |
 
 Then `volume_count` entries:
@@ -120,10 +120,10 @@ Then `volume_count` entries:
 
 Then a 16-byte AES-CMAC over everything before it, under a key of its own.
 
-A copy is used when its header has `copy_flag` set, the data checksum holds,
-the record verifies, and its `image_seq` matches the header's. The record ends
-where its `volume_count` says; `data_size` may run past it, since relocation
-seals up to the last written write block.
+A copy is used when its header has `copy_flag` set, the data checksum matches,
+the record MAC verifies and its `image_seq` matches the header's. The record
+ends after `volume_count` entries; `data_size` may be larger, since relocation
+copies up to the last written write block.
 
 ## Keys
 
@@ -144,9 +144,9 @@ The key must carry `PSA_KEY_USAGE_DERIVE` and permit
 `key_context` is up to 32 bytes, appended as given; a partition attaches only
 under the context it was formatted with.
 
-The salt is a constant: `image_seq` lives in a header that cannot be verified
-without the key. It is compared explicitly and sits inside the MAC message
-instead.
+The salt is a constant. `image_seq` cannot serve as the salt, because it sits
+in a header that can only be verified with the key; it is part of the MAC
+message instead, and compared explicitly.
 
 The derived keys are volatile, cannot be exported, and are destroyed by
 `ubi_device_deinit()`.

@@ -5,6 +5,7 @@ let diagrams = 0
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
 import { useData } from 'vitepress'
+import { zoomed } from './zoom'
 
 // Drawn in the browser, from the source the markdown carries.
 const props = defineProps<{ code: string }>()
@@ -26,12 +27,23 @@ async function draw() {
   svg.value = drawn.svg
 }
 
+// Drawn again under an id of its own, so that no id appears twice.
+async function zoom() {
+  const { default: mermaid } = await import('mermaid')
+  const drawn = await mermaid.render(
+    `${id}-zoom`,
+    decodeURIComponent(props.code)
+  )
+
+  zoomed.value = drawn.svg
+}
+
 onMounted(draw)
 watch(isDark, draw)
 </script>
 
 <template>
-  <div class="mermaid" v-html="svg" />
+  <div class="mermaid" @click="zoom" v-html="svg" />
 </template>
 
 <style scoped>
@@ -39,5 +51,6 @@ watch(isDark, draw)
   display: flex;
   justify-content: center;
   margin: 16px 0;
+  cursor: zoom-in;
 }
 </style>

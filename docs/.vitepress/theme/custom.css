@@ -1,0 +1,4 @@
+/* Keeps names such as -EBADMSG from breaking at the hyphen. */
+.vp-doc td code {
+  white-space: nowrap;
+}

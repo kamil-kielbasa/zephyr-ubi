@@ -48,7 +48,7 @@ static int attach(struct ubi_device *ubi)
 {
 	int ret = ubi_device_init(ubi, &cfg);
 
-	/* Any other failure leaves metadata a format would destroy. */
+	/* Format only a partition without a UBI device. */
 	if (-ENODEV != ret)
 		return ret;
 
@@ -61,22 +61,22 @@ static int attach(struct ubi_device *ubi)
 }
 ```
 
-The handle comes from the heap, `k_calloc(1, ubi_device_size())`, after
-`psa_crypto_init()`. Only `-ENODEV` means there is nothing to lose; for every
-other result see [Operations](operations.md#when-an-attach-fails).
+Allocate the handle with `k_calloc(1, ubi_device_size())`, after
+`psa_crypto_init()`. Format only after `-ENODEV`; for every other result see
+[Operations](operations.md#when-an-attach-fails).
 
 ```mermaid
 flowchart TD
     init["ubi_device_init()"] -->|"0"| use(["use the volumes"])
-    init -->|"-ENODEV: no UBI metadata"| format["ubi_device_format(), then ubi_device_init()"]
+    init -->|"-ENODEV: no UBI device"| format["ubi_device_format(), then ubi_device_init()"]
     format --> use
     init -->|"any other error"| keep(["report it and keep the device"])
 ```
 
 ## Volumes and blocks
 
-Volume identifiers change with every format, so look them up by name after
-each attach:
+Volume identifiers are not kept across a format, so look volumes up by name
+after each attach:
 
 ```c
 static int logs_open(struct ubi_device *ubi, uint32_t *vol_id)
@@ -91,15 +91,14 @@ static int logs_open(struct ubi_device *ubi, uint32_t *vol_id)
 }
 ```
 
-`ubi_leb_change(ubi, vol_id, lnum, data, size)` replaces a block whole, and
+`ubi_leb_change(ubi, vol_id, lnum, data, size)` replaces the whole LEB, and
 `ubi_leb_read(ubi, vol_id, lnum, offset, buffer, size)` reads any part of it.
 Bytes never written read as erased.
 
 ## Appending records
 
-`ubi_leb_write_at()` writes where it is told and remembers nothing, so the
-application keeps its own offset, in whole write blocks. `leb_size` comes from
-`ubi_device_get_info()`:
+`ubi_leb_write_at()` stores no length, so the application keeps its own
+offset, in whole write blocks. `leb_size` comes from `ubi_device_get_info()`:
 
 ```c
 static int record_append(struct ubi_device *ubi, uint32_t vol_id,
@@ -126,21 +125,22 @@ static int record_append(struct ubi_device *ubi, uint32_t vol_id,
 }
 ```
 
-A region may be written once until the block is changed, unmapped or erased.
-After a reboot the application finds its own place: bytes past the last record
-read as erased.
+Writes go in rising order until the LEB is changed, unmapped or erased; the
+example erases the LEB when it is full. After a reboot the application finds
+the end of its records: bytes past the last one read as erased.
 
 ## Provisioning the key
 
-Generate the keying material once, on the device and inside the key store,
-under an identifier fixed for the product:
+Import the keying material once, during production, as a persistent key under
+an identifier fixed for the product. The material comes from your
+provisioning system and should differ between devices:
 
 ```c
 #include <zephyr/psa/key_ids.h>
 
 #define DEVICE_IKM_KEY_ID ZEPHYR_PSA_APPLICATION_KEY_ID_RANGE_BEGIN
 
-static int ikm_provision(void)
+static int ikm_provision(const uint8_t *material, size_t size)
 {
 	psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
 	psa_key_id_t key_id = PSA_KEY_ID_NULL;
@@ -156,24 +156,23 @@ static int ikm_provision(void)
 	psa_set_key_id(&attributes, DEVICE_IKM_KEY_ID);
 	psa_set_key_lifetime(&attributes, PSA_KEY_LIFETIME_PERSISTENT);
 	psa_set_key_type(&attributes, PSA_KEY_TYPE_DERIVE);
-	psa_set_key_bits(&attributes, 256);
 	psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_DERIVE);
 	psa_set_key_algorithm(&attributes, PSA_ALG_HKDF(PSA_ALG_SHA_256));
 
-	status = psa_generate_key(&attributes, &key_id);
+	status = psa_import_key(&attributes, material, size, &key_id);
 	psa_reset_key_attributes(&attributes);
 
 	return (PSA_SUCCESS == status) ? 0 : -EIO;
 }
 ```
 
-The key is unique to the device and cannot be exported, UBI included. With
-TF-M it stays in the secure domain; without it, Zephyr's secure storage keeps
-it (`CONFIG_SECURE_STORAGE=y`). A key derived from a hardware unique key works
-as well, if its policy allows `PSA_KEY_USAGE_DERIVE` with
-`PSA_ALG_HKDF(PSA_ALG_SHA_256)`.
+Wipe the material from RAM once it is imported. The key cannot be exported,
+not even by UBI. A key that is never needed outside the device can instead be
+generated on it, with `psa_generate_key()`, the same attributes and a size of
+256 bits. A key derived from a hardware unique key also works, if its policy
+allows `PSA_KEY_USAGE_DERIVE` with `PSA_ALG_HKDF(PSA_ALG_SHA_256)`.
 
-A lost key takes the partition with it: every attach returns `-EBADMSG`. A
+If the key is lost, so is the partition: every attach returns `-EBADMSG`. A
 second partition under the same key needs its own `key_context`:
 
 ```c
@@ -191,9 +190,8 @@ static const struct ubi_config scratch_cfg = {
 
 ## Maintenance on a work queue
 
-Nothing runs in the background. A work queue of its own suits maintenance: a
-UBI call needs up to 2 KiB of stack, more than the system work queue has by
-default.
+Run maintenance on a work queue of its own: a UBI call needs up to 2 KiB of
+stack, more than the system work queue has by default.
 
 ```c
 K_THREAD_STACK_DEFINE(maintenance_stack, 4096);
@@ -220,16 +218,18 @@ static void maintenance_run(struct k_work *work)
 		remaining += result.remaining;
 	}
 
-	/* Back soon while there is work, rarely once there is none. */
-	k_work_reschedule_for_queue(&maintenance_queue, self,
-				    (0 != remaining) ? K_MSEC(100) :
-						       K_SECONDS(60));
+	k_timeout_t delay = K_SECONDS(60);
+
+	/* Come back soon while work is left. */
+	if (0 != remaining)
+		delay = K_MSEC(100);
+
+	k_work_reschedule_for_queue(&maintenance_queue, self, delay);
 }
 
 static K_WORK_DELAYABLE_DEFINE(maintenance_work, maintenance_run);
 ```
 
-Start it once the device is attached, and cancel it with
-`k_work_cancel_delayable_sync()` before `ubi_device_deinit()`. Repair and
-discard are due after particular events; see
+Start it after the attach, and cancel it with `k_work_cancel_delayable_sync()`
+before `ubi_device_deinit()`. When to run repair and discard:
 [Operations](operations.md#keeping-maintenance-up).

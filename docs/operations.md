@@ -1,81 +1,85 @@
 # Operations
 
-What UBI reports, what a power cut leaves, and what it costs. The contract of
-every call is in
+What to do when UBI returns an error or reports an event, what a power cut
+leaves behind, and what UBI costs. The contract of every call is in
 [include/ubi/ubi.h](https://github.com/kamil-kielbasa/zephyr-ubi/blob/main/include/ubi/ubi.h).
 
 ## When an attach fails
 
-`ubi_device_init()` writes nothing, so a failed attach changes nothing. Only
-`-ENODEV` says there is nothing to lose.
+`ubi_device_init()` writes nothing, so a failed attach leaves the flash as it
+was. Format the partition only after `-ENODEV`: after any other error a UBI
+device may be on it, and a format would destroy it.
 
 | returns | means | do |
 |---|---|---|
-| `-ENODEV` | no UBI metadata: blank, or someone else's bytes | format, if that is expected here |
-| `-EBADMSG` | metadata that will not verify: the wrong key, both volume table copies damaged, or data with no table left | keep the device; a format destroys the data |
+| `-ENODEV` | no UBI device: the partition is blank or holds other data | format it, if that is expected |
+| `-EBADMSG` | UBI metadata failed verification: a different key, damage or tampering | keep the device; a format destroys its data |
 | `-ENOTSUP` | written by a newer release, or with more volumes than `CONFIG_UBI_MAX_NR_OF_VOLUMES` | run the newer firmware, or raise the limit |
-| `-EIO` | a block could not be read, or the crypto backend failed | try again; if it persists, it is the hardware |
-| `-EROFS` | the state callback refused the device | treat it as a rollback |
-| `-EINVAL` | the partition is not whole erase blocks of one size, not the geometry formatted, or has too many corrupt blocks | check the devicetree; see [maintenance](#keeping-maintenance-up) |
-| `-EACCES` | the key handle is missing or may not derive with HKDF | fix the key's policy |
+| `-EIO` | flash or crypto failure | try again; if it persists, check the hardware |
+| `-EROFS` | the state callback returned `UBI_STATE_UNTRUSTED` | treat it as a rollback |
+| `-EINVAL` | invalid configuration, a partition geometry UBI cannot use or that differs from the format, or too many corrupt blocks | check the configuration and the devicetree; see [maintenance](#keeping-maintenance-up) |
+| `-EACCES` | the key does not exist or does not allow HKDF-SHA256 derivation | fix the key or its policy |
 | `-ENOMEM` | not enough heap | see [Resources](#resources) |
-| `-EBUSY` | the partition is attached or being formatted | detach the other handle first |
-| `-ENOSPC` | more than 65534 blocks, or a table declaring more blocks than there are | use fewer, larger blocks |
+| `-EBUSY` | the handle or the partition is in use | detach the other handle first |
+| `-ENOSPC` | more than 65534 blocks, or volumes that do not fit the partition | use fewer, larger blocks |
 
 ## Events
 
-Events are reports: UBI has acted on what it found before the callback runs.
+Events only report: UBI has already acted when the callback runs.
 
 | event | means | do |
 |---|---|---|
-| `UBI_EVENT_HDR_CORRUPT` | a header failed its CRC: a write or erase cut short, or bit rot | nothing after a power cut; data behind a bad header is kept, see `corrupt_pebs` |
-| `UBI_EVENT_HDR_TAMPERED` | a header passed its CRC and failed its MAC: modified, or sealed under another key | expected after a key change until reclaim has run; otherwise keep the device as evidence |
-| `UBI_EVENT_VOLUME_TABLE_CORRUPT` | a volume table copy could not be used | nothing while the other copy carries the device |
-| `UBI_EVENT_VOLUME_TABLE_DEGRADED` | the table rests on one copy | `UBI_MAINTENANCE_REPAIR` soon |
-| `UBI_EVENT_LEB_ORPHANED` | a block names a volume the table does not describe | nothing; reclaim takes it |
-| `UBI_EVENT_PEB_BAD` | a block was retired after a failed write or erase, or an erase count at its limit | after a failed write, `UBI_MAINTENANCE_REPAIR`; after a failed erase the device is read-only |
-| `UBI_EVENT_DATA_CORRUPT` | a sealed block fails its data checksum: a change cut short, or damage | nothing if an older copy stood in; otherwise the block is kept as it reads |
+| `UBI_EVENT_HDR_CORRUPT` | a header failed its CRC: a write or erase cut short, or bit rot | nothing after a power cut; data behind a damaged header is kept, see `corrupt_pebs` |
+| `UBI_EVENT_HDR_TAMPERED` | a header failed authentication: modified, or written under another key | expected after a key change until reclaim has run; otherwise keep the device as evidence |
+| `UBI_EVENT_VOLUME_TABLE_CORRUPT` | a volume table copy could not be used | nothing while the other copy works |
+| `UBI_EVENT_VOLUME_TABLE_DEGRADED` | only one volume table copy is usable, or the copies differ | run `UBI_MAINTENANCE_REPAIR` soon |
+| `UBI_EVENT_LEB_ORPHANED` | a block names a volume this device never created | nothing; reclaim erases it |
+| `UBI_EVENT_PEB_BAD` | a block was retired: a write or erase failed, or its erase count reached the limit | after a failed write, run `UBI_MAINTENANCE_REPAIR`; after a failed erase the device is read-only |
+| `UBI_EVENT_DATA_CORRUPT` | the data of a LEB failed its checksum: a change cut short, or damage | nothing if the previous contents were used; otherwise the LEB keeps the data as it reads |
 
 ## Power loss
 
 | cut short | after the reboot |
 |---|---|
-| `ubi_leb_change()` | the old contents or the new; a block that had none keeps what reached the flash, with `UBI_EVENT_DATA_CORRUPT` |
-| `ubi_leb_write_at()` | what reached the flash; the application finds its own frontier |
-| `ubi_leb_erase()`, or an unmap and a reclaim | the last contents or nothing, never contents a change replaced |
+| `ubi_leb_change()` | the old contents or the new; a LEB with no old contents keeps the part of the new data that was written, reported with `UBI_EVENT_DATA_CORRUPT` |
+| `ubi_leb_write_at()` | the part of the data that was written; the application finds the end of its data itself |
+| `ubi_leb_erase()`, or reclaim after an unmap | the last contents or none, never older ones |
 | volume create, resize or remove | the old layout or the new |
-| `UBI_MAINTENANCE_RELOCATE` | the block where it was or where it was moved |
-| `ubi_device_format()` | the earlier device or the new one |
+| `UBI_MAINTENANCE_RELOCATE` | the LEB in its old block or in the new one |
+| `ubi_device_format()` | the previous device or the new one |
 
-The third row relies on `CONFIG_UBI_ERASE_INVALIDATES_HEADERS`. Without it, an
-erase cut short can leave a block with its headers and part of its data:
-sealed data is then reported with `UBI_EVENT_DATA_CORRUPT`, appended data is
-not.
+The third row needs `CONFIG_UBI_ERASE_INVALIDATES_HEADERS`, which is on by
+default. Without it, an erase cut short can leave a block with valid headers
+and part of its data. Data with a checksum is then reported with
+`UBI_EVENT_DATA_CORRUPT`; appended data is not.
 
-A write that fails, unlike a power cut, leaves RAM and flash in agreement:
-what the device reports right after is what the next attach finds.
+A failed write is different from a power cut: what the device reports right
+after it is what the next attach finds.
 
 ## Keeping maintenance up
 
+What one step of each operation does is in the contract of
+`ubi_maintenance()`. When to run them:
+
 | operation | when | budget |
 |---|---|---|
-| `UBI_MAINTENANCE_RECLAIM` | whenever the device is idle | a few blocks; a full free pool makes writes erase-free |
-| `UBI_MAINTENANCE_RELOCATE` | `relocatable_pebs` is not zero | one at a time; each moves a block and erases one |
+| `UBI_MAINTENANCE_RECLAIM` | whenever the device is idle | a few blocks; with a full free pool, writes need no erase |
+| `UBI_MAINTENANCE_RELOCATE` | `relocatable_pebs` is not zero | one at a time; each step copies a block and erases one |
 | `UBI_MAINTENANCE_REPAIR` | after `UBI_EVENT_VOLUME_TABLE_DEGRADED` or `UBI_EVENT_PEB_BAD` | until `remaining` is zero |
-| `UBI_MAINTENANCE_DISCARD` | once the application has read what it wants from `corrupt_pebs` | all of them |
+| `UBI_MAINTENANCE_DISCARD` | when nothing on the `corrupt_pebs` is needed any more | all of them |
 
-A budget of zero only counts the work waiting. Attach refuses a partition once
-corrupt blocks reach a twentieth of its good blocks, rounded down, or eight
-when that is zero; discard before that.
+Attach refuses a partition once corrupt blocks reach a twentieth of its good
+blocks, rounded down, or eight when that is zero. Discard them before that.
 
-A failed erase leaves the device read-only until the next attach: every call
-that would write returns `-EROFS`, reads keep working. A part that keeps
-failing erases is at the end of its life.
+After a failed erase the device is read-only until the next attach: reads
+work, and every call that would write returns `-EROFS`; see
+[Bad blocks](how-it-works.md#bad-blocks). A part that keeps failing erases is
+at the end of its life.
 
 ## Changing the key
 
-Everything UBI writes is sealed under keys derived from the keying material,
-so new keying material means a new device:
+Everything UBI writes is authenticated with keys derived from the keying
+material, so new keying material means a new device:
 
 1. Attach under the old key and copy out what has to survive.
 2. Detach and format under the new key.
@@ -84,7 +88,7 @@ so new keying material means a new device:
 4. Run `UBI_MAINTENANCE_RECLAIM` until `reclaimable_pebs` is zero.
 5. Create the volumes and write back what was copied out.
 
-The erase counts were sealed under the old key and are lost with it.
+The erase counts are authenticated with the old key, so they are lost with it.
 
 ## Resources
 
@@ -97,7 +101,7 @@ timings on the nRF5340 DK:
 | handle, `ubi_device_size()` | 328 bytes with 4 volumes, 2248 with 64 |
 | heap at attach | 8 bytes per erase block, and a scratch buffer of 392 bytes with 4 volumes, 3480 with 64 |
 | heap during a format | a handle and a scratch buffer of its own |
-| stack | 1704 bytes at most for any call on a Cortex-M33, with the default `CONFIG_UBI_IO_CHUNK_SIZE`; a larger chunk adds up to its growth |
+| stack | 1704 bytes at most for any call on a Cortex-M33, with the default `CONFIG_UBI_IO_CHUNK_SIZE`; a larger chunk adds its growth |
 | attach | 151 ms at most for 64 blocks of 4 KiB on the DK's MX25R64 |
 | erase | 87 ms for a 4 KiB block and 1.2 s for a 64 KiB one on the same part |
 

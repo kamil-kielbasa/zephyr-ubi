@@ -1,10 +1,10 @@
 # UBI basic
 
 Attaches UBI to a partition, formats it only when it holds no UBI metadata,
-and counts boots in a volume of one block. The state callback applies the
-rollback rule from [security.md](../../docs/security.md), with the anchor kept
-in RAM. The key is fixed in the source; a product provisions one per device
-and partition.
+and counts boots in a volume of one block. The state callback compares
+`image_seq` and `revision` with an anchor kept in RAM;
+[security.md](../../docs/security.md) describes a complete check. The key is
+fixed in the source; a product provisions one per device and partition.
 
 ## Building and running
 

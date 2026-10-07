@@ -124,9 +124,10 @@ struct ubi_keys {
  */
 struct ubi_callbacks {
 	/** Integrity event sink. */
-	ubi_event_cb_t event;
+	void (*event)(const struct ubi_event *event, void *user_context);
 	/** Trust check. */
-	ubi_state_cb_t state;
+	enum ubi_state_verdict (*state)(const struct ubi_device_info *info,
+					void *user_context);
 	/** Passed back to both. */
 	void *user_context;
 };

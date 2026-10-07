@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.1.2 (2026-10-06)
+
+No change to the library code or to the on-flash format.
+
+### API
+
+- Every call and type in `include/ubi/ubi.h` and `include/ubi/types.h` is
+  described briefly: what it does, what it expects and what each error means.
+- `ubi_volume_resize()` says what a shrink needs, `ubi_leb_map()` what it is
+  for, and `ubi_maintenance()` what one step of each operation does.
+- `struct ubi_device_info` and `struct ubi_volume_info` list their fields by
+  topic; code that names the fields is not affected.
+- The public headers have no `extern "C"` blocks and no Doxygen groups.
+- The `ubi_event_cb_t` and `ubi_state_cb_t` typedefs are gone:
+  `struct ubi_config` declares `event_cb` and `state_cb` itself. Code that
+  only assigns the callbacks is not affected.
+
+### Documentation
+
+- The README says what Unsorted Block Images are and what they give, and
+  lists only the features this UBI has.
+- How it works explains logical and physical blocks, and has sections on
+  damaged headers, bad blocks and wear levelling.
+- Security first explains how the metadata is protected, then gives the
+  threat model, what is detected, the limits, good practice for rollback
+  detection with a check in pseudocode, and advice on protecting data.
+- The key provisioning example imports a fixed key.
+- Every page says the same as the API, in shorter and plainer sentences.
+- Appends follow one rule everywhere: rising order, until the block is
+  changed, unmapped or erased.
+- The block state diagram no longer has a resize send a mapped block to
+  reclaim.
+- The home page has a tile for every guide page, and error codes in tables
+  no longer break after the minus sign.
+- Diagrams and images open full screen on a click.
+
 ## v0.1.1 (2026-10-02)
 
 No change to the library or to the on-flash format.
