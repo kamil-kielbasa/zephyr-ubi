@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.4 (2026-10-24)
+
+No change to the on-flash format.
+
+### API
+
+- `ubi_leb_read()` with a length of zero succeeds without a buffer, as its
+  description says and as `ubi_leb_change()` and `ubi_leb_write_at()` already
+  do; it used to return `-EINVAL` when the buffer was `NULL`.
+
 ## v0.1.3 (2026-10-07)
 
 No change to the library or to the on-flash format.
